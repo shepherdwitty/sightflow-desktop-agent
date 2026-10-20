@@ -4,7 +4,15 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { checkAndRequestPermissions } from './permission'
 import Store from 'electron-store'
-import { AIClient } from '../core/ai-client'
+import { AIClient, DEFAULT_MODEL } from '../core/ai-client'
+import { setUsageDir, summarizeUsage } from '../core/usage/usage-ledger'
+import {
+  explicitVisionApiKey,
+  omitApiKeyIfSchemaOmitsIt,
+  resolveChatKey,
+  resolveVisionApiKey,
+  shouldDeleteLegacyApiKey
+} from './api-key-policy'
 import { DesktopDevice } from '../core/device'
 import { RPADevice } from '../core/rpa-device'
 import { BoxSelectDevice } from '../core/box-select-device'
@@ -43,7 +51,6 @@ import { ExperienceStore, NewExperienceCard } from '../core/memory/experience-st
 import { induceCardsFromSession } from '../core/memory/learn-from-session'
 const StoreClass = typeof Store === 'function' ? Store : ((Store as any).default as typeof Store)
 
-const FIXED_ARK_MODEL = 'doubao-seed-2-0-lite-260215'
 const FIXED_ARK_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
 
 interface PerAppCapture {
@@ -446,6 +453,13 @@ app.whenReady().then(async () => {
   // IPC test
   ipcMain.on('ping', () => console.log('pong'))
 
+  // ── 模型用量账本 ──
+  setUsageDir(join(app.getPath('userData'), 'usage'))
+  ipcMain.handle('usage:summary', async (_event, limit?: number) => summarizeUsage(limit ?? 200))
+  ipcMain.handle('usage:openFolder', async () =>
+    shell.openPath(join(app.getPath('userData'), 'usage'))
+  )
+
   // ── Settings 持久化 ──
   ipcMain.handle('settings:getAll', async () => {
     return normalizeSettings(settingsStore.store)
@@ -479,7 +493,29 @@ app.whenReady().then(async () => {
       }
     } satisfies AppSettings
 
+    if (typeof next.vision.apiKey === 'string') {
+      next.vision.apiKey = next.vision.apiKey.trim()
+    }
+    if (typeof next.chatProvider.config?.apiKey === 'string') {
+      next.chatProvider.config.apiKey = next.chatProvider.config.apiKey.trim()
+    }
+
     settingsStore.set(next as any)
+    // electron-store 的 set 是合并写入，不会清掉 defaults 里没有的顶层 apiKey。
+    // 视觉密钥已经迁移成功，或用户这次明确把视觉密钥存成空串时，才删除这把旧钥匙。
+    const legacyStore = settingsStore as unknown as {
+      has(key: string): boolean
+      delete(key: string): void
+    }
+    if (
+      shouldDeleteLegacyApiKey({
+        hasLegacy: legacyStore.has('apiKey'),
+        nextVisionApiKey: next.vision.apiKey,
+        explicitVisionApiKey: explicitVisionApiKey(data)
+      })
+    ) {
+      legacyStore.delete('apiKey')
+    }
     return { success: true }
   })
 
@@ -520,7 +556,7 @@ app.whenReady().then(async () => {
       }
     }
 
-    // 没装过 → 回退到内置 doubao（apiKey 字段已剥离，使用视觉密钥）
+    // 没装过 → 回退到内置 doubao（apiKey 非必填，留空时运行时回退视觉密钥）
     const installed = await getBuiltinDoubaoInstalledInfo()
     const manifest = await getBuiltinDoubaoManifestForUi()
     return {
@@ -600,7 +636,7 @@ app.whenReady().then(async () => {
 
       const client = new AIClient({
         apiKey,
-        model: FIXED_ARK_MODEL,
+        model: DEFAULT_MODEL,
         baseURL: FIXED_ARK_BASE_URL
       })
       const induced = await induceCardsFromSession(client, data.session, data.steps)
@@ -683,7 +719,7 @@ app.whenReady().then(async () => {
     const apiKey = config?.apiKey || normalizeSettings(settingsStore.store).vision.apiKey
     const client = new AIClient({
       apiKey,
-      model: FIXED_ARK_MODEL,
+      model: DEFAULT_MODEL,
       baseURL: FIXED_ARK_BASE_URL
     })
     return client.testConnection()
@@ -804,29 +840,39 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
     const settings = normalizeSettings(rawConfig || settingsStore.store)
     const appType: AppType = settings.appType || 'wechat'
     const startupStrategy = resolveSettingsStrategy(appType, settings)
-    const providerNeedsVisionKey =
+    // 豆包（内置或经 hub 安装）聊天密钥已解耦：非空 config.apiKey 优先，空白回退视觉密钥
+    const isDoubaoPath =
       !settings.chatProvider.installed ||
       settings.chatProvider.installed.id === BUILTIN_DOUBAO_PROVIDER_ID
-    const needsVisionKey = startupStrategy === 'vlm' || providerNeedsVisionKey
+    const visionKey = settings.vision.apiKey.trim()
+    const chatKey = resolveChatKey(settings.chatProvider.config?.apiKey, visionKey)
 
-    if (needsVisionKey && !settings.vision.apiKey) {
+    if (isDoubaoPath && !chatKey) {
+      return {
+        ok: false,
+        reason: 'no_chat_key',
+        message: '请填写智能体 API Key，或在基础配置中填写视觉密钥'
+      }
+    }
+    // 视觉密钥仅在 VLM 抓取策略下必需
+    if (startupStrategy === 'vlm' && !visionKey) {
       return { ok: false, reason: 'no_vision_key', message: '请先填写视觉接口密钥' }
     }
 
-    // 没有自定义 provider → 走内置 doubao，使用视觉密钥
+    // 没有自定义 provider → 走内置 doubao
     let provider
     if (!settings.chatProvider.installed) {
       const loaded = await loadBuiltinDoubaoProvider({
         ...settings.chatProvider.config,
-        apiKey: settings.vision.apiKey
+        apiKey: chatKey
       })
       provider = loaded.provider
     } else {
       const installedManifest = await getInstalledProviderManifest(settings.chatProvider.installed)
-      // doubao（无论是用户主动装的还是内置的）apiKey 由视觉密钥共享提供，不强校验
-      const isDoubao = settings.chatProvider.installed.id === BUILTIN_DOUBAO_PROVIDER_ID
+      // chatKey 非空已由上方 no_chat_key 校验保证；此处对 apiKey 的豁免仅是防御：
+      // userData 中 hub 安装的旧版豆包 manifest 副本 required 可能仍含 apiKey
       const required = (installedManifest?.configSchema?.required || []).filter(
-        (key) => !(isDoubao && key === 'apiKey')
+        (key) => !(isDoubaoPath && key === 'apiKey')
       )
       const missing = required.find((key) => {
         const value = settings.chatProvider.config?.[key]
@@ -840,9 +886,12 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
         }
       }
 
-      const effectiveConfig = isDoubao
-        ? { ...settings.chatProvider.config, apiKey: settings.vision.apiKey }
-        : settings.chatProvider.config
+      const effectiveConfig = isDoubaoPath
+        ? { ...settings.chatProvider.config, apiKey: chatKey }
+        : omitApiKeyIfSchemaOmitsIt(
+            settings.chatProvider.config,
+            installedManifest?.configSchema?.properties
+          )
 
       const loaded = await loadInstalledProvider(settings.chatProvider.installed, effectiveConfig)
       provider = loaded.provider
@@ -858,7 +907,7 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
     let device: DesktopDevice
     let strategy: CaptureStrategy
     try {
-      const built = await buildDevice(appType, settings, settings.vision.apiKey, log)
+      const built = await buildDevice(appType, settings, visionKey, log)
       device = built.device
       strategy = built.strategy
     } catch (err: any) {
@@ -877,7 +926,7 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
       appType,
       engineVersion: app.getVersion(),
       providerId: settings.chatProvider.installed?.id ?? BUILTIN_DOUBAO_PROVIDER_ID,
-      model: settings.chatProvider.config?.model || FIXED_ARK_MODEL
+      model: settings.chatProvider.config?.model || DEFAULT_MODEL
     })
 
     const onTrace = (input: TraceStepInput): void => {
@@ -1113,18 +1162,15 @@ function normalizeCapture(raw: unknown): Partial<Record<AppType, PerAppCapture>>
 }
 
 function normalizeSettings(raw: any): AppSettings {
-  const oldApiKey = typeof raw?.apiKey === 'string' ? raw.apiKey : ''
-  const oldModel = typeof raw?.model === 'string' && raw.model ? raw.model : FIXED_ARK_MODEL
+  const oldModel = typeof raw?.model === 'string' && raw.model ? raw.model : DEFAULT_MODEL
   const oldSystemPrompt = typeof raw?.systemPrompt === 'string' ? raw.systemPrompt : ''
   const rawProviderConfig =
     raw?.chatProvider?.config && typeof raw.chatProvider.config === 'object'
       ? { ...raw.chatProvider.config }
       : {}
 
-  // Keep arbitrary provider config keys, and only backfill legacy volcengine fields for old persisted settings.
-  if (rawProviderConfig.apiKey === undefined && oldApiKey) {
-    rawProviderConfig.apiKey = oldApiKey
-  }
+  // 顶层 legacy apiKey 只迁入视觉密钥（见 resolveVisionApiKey），不写入聊天 config。
+  // 否则 config.apiKey || vision.apiKey 会让过期的旧钥匙压过后来保存的视觉密钥。
   if (rawProviderConfig.model === undefined && oldModel) {
     rawProviderConfig.model = oldModel
   }
@@ -1136,7 +1182,7 @@ function normalizeSettings(raw: any): AppSettings {
     locale: raw?.locale === 'en' ? 'en' : 'zh',
     appType: coerceAppType(raw?.appType),
     vision: {
-      apiKey: raw?.vision?.apiKey || oldApiKey || ''
+      apiKey: resolveVisionApiKey(raw)
     },
     chatProvider: {
       manifestUrl: raw?.chatProvider?.manifestUrl || raw?.providerManifestUrl || '',

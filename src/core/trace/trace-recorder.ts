@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto'
 import { appendFile, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { AppType } from '../rpa/types'
+import { discardPendingUsage, takePendingUsage } from '../usage/usage-ledger'
 import { TraceSessionMeta, TraceStep, TraceStepInput } from './trace-types'
 
 const SESSIONS_DIR = 'sessions'
@@ -33,6 +34,8 @@ export class TraceRecorder {
   constructor(private readonly baseDir: string) {}
 
   startSession(input: TraceSessionStartInput): TraceSessionMeta {
+    // 上一会话没人领走的 reply 不能算进这次的第一步
+    discardPendingUsage()
     if (this.session) {
       this.endSession()
     }
@@ -83,6 +86,8 @@ export class TraceRecorder {
       action: input.action,
       outcome: input.outcome
     }
+    const usage = input.usage ?? (input.claimPendingUsage ? takePendingUsage() : undefined)
+    if (usage && usage.calls > 0) step.usage = usage
 
     const screenshot = input.screenshotBase64 ? parseScreenshotBase64(input.screenshotBase64) : null
     if (screenshot) {
@@ -107,6 +112,7 @@ export class TraceRecorder {
   }
 
   endSession(): void {
+    discardPendingUsage()
     const session = this.session
     if (!session) return
 

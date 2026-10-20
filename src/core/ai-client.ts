@@ -6,6 +6,7 @@
 //   1. 聊天回复：截图 → AI 分析 → 回复文字
 //   2. VLM 视觉检测：截图 → AI 分析 → bbox/point 坐标
 
+import { recordUsage } from './usage/usage-ledger'
 import { MemoryCardBrief } from './trace/trace-types'
 
 export interface AIClientConfig {
@@ -25,7 +26,9 @@ export function buildMemorySection(memoryCards?: MemoryCardBrief[]): string {
   return `\n\n## 团队经验（来自工作记忆，优先遵循）\n${lines.join('\n')}`
 }
 
-const DEFAULT_MODEL = 'doubao-seed-2-0-lite-260215'
+// 默认模型名（单一常量源）。manifest.json / provider.bundle.js / README 中的
+// 模型名与 usage-ledger.ts 的价格表无法 import 此处，升级时需手动同步。
+export const DEFAULT_MODEL = 'doubao-seed-2-0-lite-260428'
 const DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
 
 const REPLY_SYSTEM_PROMPT = `你是一个微信自动回复助手。你会收到一张微信/企业微信的聊天窗口截图。
@@ -56,14 +59,18 @@ export class AIClient {
    * 发送截图给 AI，获取聊天回复
    * memoryCards: 运行时注入的经验卡片（工作记忆），拼入 system prompt
    */
-  async getReply(screenshotBase64: string, memoryCards?: MemoryCardBrief[]): Promise<string | null> {
+  async getReply(
+    screenshotBase64: string,
+    memoryCards?: MemoryCardBrief[]
+  ): Promise<string | null> {
     const startTime = Date.now()
     try {
       console.log('[AIClient] getReply 开始...')
       const replyText = await this.callVision(
         this.config.systemPrompt + buildMemorySection(memoryCards),
         '请根据截图中微信聊天窗口的最新消息进行回复。',
-        screenshotBase64
+        screenshotBase64,
+        'reply'
       )
 
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
@@ -89,17 +96,16 @@ export class AIClient {
     return await this.callVision(
       '你是一个视觉分析专家。请严格按照用户要求的格式输出检测结果。',
       prompt,
-      screenshotBase64
+      screenshotBase64,
+      'vision'
     )
   }
 
   /**
    * 纯文本调用（不带图片）— 用于 testConnection 等
    */
-  async callText(userMessage: string): Promise<string> {
-    const data = await this.callAPI([
-      { role: 'user', content: userMessage }
-    ])
+  async callText(userMessage: string, purpose: string = 'learn'): Promise<string> {
+    const data = await this.callAPI([{ role: 'user', content: userMessage }], purpose)
     return this.extractText(data)
   }
 
@@ -108,7 +114,7 @@ export class AIClient {
    */
   async testConnection(): Promise<{ success: boolean; error?: string }> {
     try {
-      await this.callText('你好，请回复"连接成功"。')
+      await this.callText('你好，请回复"连接成功"。', 'test')
       return { success: true }
     } catch (error: any) {
       return { success: false, error: error?.message || String(error) }
@@ -131,23 +137,25 @@ export class AIClient {
   private async callVision(
     systemPrompt: string,
     userText: string,
-    imageBase64: string
+    imageBase64: string,
+    purpose: string = 'vision'
   ): Promise<string> {
     const rawBase64 = this.stripBase64Prefix(imageBase64)
-    const imageUrl = rawBase64.startsWith('http')
-      ? rawBase64
-      : `data:image/png;base64,${rawBase64}`
+    const imageUrl = rawBase64.startsWith('http') ? rawBase64 : `data:image/png;base64,${rawBase64}`
 
-    const data = await this.callAPI([
-      { role: 'system', content: systemPrompt },
-      {
-        role: 'user',
-        content: [
-          { type: 'image_url', image_url: { url: imageUrl } },
-          { type: 'text', text: userText }
-        ]
-      }
-    ])
+    const data = await this.callAPI(
+      [
+        { role: 'system', content: systemPrompt },
+        {
+          role: 'user',
+          content: [
+            { type: 'image_url', image_url: { url: imageUrl } },
+            { type: 'text', text: userText }
+          ]
+        }
+      ],
+      purpose
+    )
 
     return this.extractText(data)
   }
@@ -157,7 +165,7 @@ export class AIClient {
    * thinking 字段是火山方舟对标 OpenAI Responses API 的扩展参数，
    * 在非火山供应商上会被忽略，放在这里不影响兼容性
    */
-  private async callAPI(messages: any[]): Promise<any> {
+  private async callAPI(messages: any[], purpose: string = 'text'): Promise<any> {
     const url = `${this.config.baseURL}/chat/completions`
     const TIMEOUT_MS = 30_000 // 30 秒超时
     const callStart = Date.now()
@@ -198,6 +206,13 @@ export class AIClient {
       }
 
       const json = await response.json()
+      recordUsage({
+        purpose,
+        source: 'AIClient',
+        model: json?.model || this.config.model,
+        usage: json?.usage,
+        requestId: json?.id
+      })
       const totalElapsed = ((Date.now() - callStart) / 1000).toFixed(1)
       console.log(`[AIClient] 解析完成 (${totalElapsed}s)`)
       return json

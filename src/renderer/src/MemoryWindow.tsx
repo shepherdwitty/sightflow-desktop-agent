@@ -5,7 +5,9 @@
 // 事件实时推送新步骤，打开本窗口可以看着轨迹一条条长出来。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import logoUrl from './assets/logo.png'
+import { SHOW_TOKEN_COST } from './feature-flags'
+import { PURPOSE_LABEL } from './usage-ui'
+import logoUrl from './assets/logo.svg'
 import { showToast } from './App'
 
 // ── 与 src/core/trace / memory 对齐的本地类型（renderer 约定：不跨层 import） ──
@@ -24,6 +26,22 @@ interface TraceSessionMeta {
 }
 
 interface TraceStep {
+  usage?: {
+    calls: number
+    inputTokens: number
+    outputTokens: number
+    cost: number
+    /** 模型在计价表内时为 true / 旧记录缺省；false 时 cost 为 0 仅占位 */
+    priced?: boolean
+    items: {
+      purpose: string
+      inputTokens: number
+      outputTokens: number
+      tier: string
+      cost: number
+      priced?: boolean
+    }[]
+  }
   stepId: string
   sessionId: string
   seq: number
@@ -214,7 +232,7 @@ export default function MemoryWindow(): React.JSX.Element {
     <div className="memory-shell">
       <aside className="memory-sidebar">
         <div className="settings-sidebar-brand">
-          <img src={logoUrl} alt="SightFlow" className="app-logo" />
+          <img src={logoUrl} alt="ChatBuddy" className="app-logo" />
           <span>工作记忆</span>
         </div>
 
@@ -381,6 +399,22 @@ function TraceView({
                 ) : null}
               </div>
               <div className="trace-step-summary">{step.summary}</div>
+              {SHOW_TOKEN_COST && step.usage ? (
+                <div
+                  className="trace-step-usage"
+                  style={{
+                    fontSize: 11,
+                    opacity: 0.8,
+                    marginTop: 4,
+                    fontVariantNumeric: 'tabular-nums'
+                  }}
+                >
+                  ⚡ 输入 {step.usage.inputTokens.toLocaleString('zh-CN')} · 输出{' '}
+                  {step.usage.outputTokens.toLocaleString('zh-CN')} tokens
+                  {step.usage.priced === false ? '' : ` · ¥${step.usage.cost.toFixed(6)}`}
+                  {step.usage.calls > 1 ? `（${step.usage.calls} 次调用）` : ''}
+                </div>
+              ) : null}
               {step.action?.payload ? (
                 <div className="trace-step-payload">{step.action.payload}</div>
               ) : null}
@@ -484,6 +518,22 @@ function StepDetail({
           <div className="step-detail-row">
             <span className="step-detail-label">判断依据</span>
             <span>{step.reasoning.content}</span>
+          </div>
+        ) : null}
+        {SHOW_TOKEN_COST && step.usage ? (
+          <div className="step-detail-row">
+            <span className="step-detail-label">算力消耗</span>
+            <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+              输入 {step.usage.inputTokens} / 输出 {step.usage.outputTokens} tokens
+              {step.usage.priced === false ? '' : `，计费 ¥${step.usage.cost.toFixed(6)}`}
+              {step.usage.items.map((it, i) => (
+                <div key={i} style={{ fontSize: 11, opacity: 0.75 }}>
+                  {PURPOSE_LABEL[it.purpose] || it.purpose}：{it.inputTokens} + {it.outputTokens}
+                  ，档位 {it.tier}
+                  {it.priced === false ? '' : `，¥${it.cost.toFixed(6)}`}
+                </div>
+              ))}
+            </span>
           </div>
         ) : null}
         {step.action ? (

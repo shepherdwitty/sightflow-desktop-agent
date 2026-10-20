@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
+import { SHOW_TOKEN_COST } from './feature-flags'
+import { PURPOSE_LABEL, fmtYuan, fmtNum, type UsageAgg, type UsageSummary } from './usage-ui'
 import { t } from './i18n'
-import logoUrl from './assets/logo.png'
+import logoUrl from './assets/logo.svg'
 import MemoryWindow from './MemoryWindow'
 import './index.css'
 
@@ -11,7 +13,7 @@ interface LogEntry {
 }
 
 type EngineStatus = 'idle' | 'running' | 'error'
-type SettingsSection = 'base' | 'agent'
+type SettingsSection = 'base' | 'agent' | 'usage'
 type AppType = 'wechat' | 'wework' | 'dingtalk' | 'lark' | 'slack' | 'telegram' | 'generic'
 
 type CaptureStrategy = 'auto' | 'vlm' | 'box-select'
@@ -140,7 +142,7 @@ const BUILTIN_PROVIDER_CATALOG: ProviderCatalogItem[] = [
   {
     id: 'doubao',
     name: '豆包 Seed',
-    description: '本地内置聊天 Provider，使用基础配置中的火山方舟密钥。',
+    description: '本地内置聊天 Provider，留空密钥时使用基础配置中的视觉密钥。',
     version: '1.0.0',
     manifestUrl: 'builtin://doubao',
     capabilities: ['chat'],
@@ -150,8 +152,9 @@ const BUILTIN_PROVIDER_CATALOG: ProviderCatalogItem[] = [
           key: 'apiKey',
           label: 'API Key',
           type: 'password',
-          required: true,
-          placeholder: '输入火山方舟 API Key'
+          required: false,
+          placeholder: '留空则使用基础配置中的视觉密钥',
+          hint: '留空共享基础配置的视觉密钥；填写后聊天服务使用此独立密钥'
         },
         {
           key: 'model',
@@ -270,7 +273,7 @@ function App() {
   return (
     <div className="app">
       <header className="app-header">
-        <img src={logoUrl} alt="SightFlow" className="app-logo" />
+        <img src={logoUrl} alt="ChatBuddy" className="app-logo" />
       </header>
 
       <div className="app-content">
@@ -307,9 +310,7 @@ function ControlPanel({
   // 初次加载：读出当前 appType + 对应的框选区域
   useEffect(() => {
     void (async () => {
-      const settings = (await window.electron?.invoke('settings:getAll')) as
-        | AppSettings
-        | undefined
+      const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings | undefined
       const initial = settings?.appType || 'wechat'
       setAppType(initial)
       await reloadRegionsForApp(initial)
@@ -455,11 +456,7 @@ function TargetAppQuickCard({
   onAppTypeChange,
   onOpenWizard
 }: TargetAppQuickCardProps): React.JSX.Element {
-  const statusText = isVlm
-    ? '自动识别（VLM）'
-    : regions
-      ? '已框选 3 / 3 个区域'
-      : '尚未框选'
+  const statusText = isVlm ? '自动识别（VLM）' : regions ? '已框选 3 / 3 个区域' : '尚未框选'
 
   return (
     <div className="card" style={{ marginBottom: 12 }}>
@@ -559,19 +556,27 @@ function BottomBar({
 }) {
   const handleStart = useCallback(async () => {
     const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings | undefined
-    if (!settings?.vision?.apiKey) {
-      showToast(t('control.start.novisionkey'), 'error')
-      return
-    }
-    // 没装自定义 provider → 走内置 doubao（getInstalled 会返回 isBuiltinDefault: true）
     const providerInfo = (await window.electron?.invoke('provider:getInstalled')) as {
       manifest: ProviderManifest | null
+      installed: InstalledProviderInfo | null
       isBuiltinDefault?: boolean
     }
-    // doubao 默认共享视觉密钥，required 已剥离 apiKey
-    const required = providerInfo?.manifest?.configSchema?.required || []
+    // 与主进程 startEngineCore 保持同一套规则，避免渲染层更严导致合法配置被拦截：
+    // 豆包路径聊天密钥 = config.apiKey || 视觉密钥；视觉密钥本身交给主进程按抓取策略校验
+    const isDoubaoPath =
+      providerInfo?.isBuiltinDefault || providerInfo?.installed?.id === 'volcengine-ark'
+    const chatExplicit = settings?.chatProvider?.config?.apiKey?.trim() || ''
+    const visionKey = settings?.vision?.apiKey?.trim() || ''
+    if (isDoubaoPath && !chatExplicit && !visionKey) {
+      showToast('请填写智能体 API Key，或在基础配置中填写视觉密钥', 'error')
+      return
+    }
+    // apiKey 豁免仅对豆包路径生效（userData 中 hub 安装的旧版豆包副本 required 可能仍含 apiKey）
+    const required = (providerInfo?.manifest?.configSchema?.required || []).filter(
+      (key) => !(isDoubaoPath && key === 'apiKey')
+    )
     const missing = required.find((key) => {
-      const value = settings.chatProvider.config?.[key]
+      const value = settings?.chatProvider?.config?.[key]
       return value === undefined || value === null || value === ''
     })
     if (missing) {
@@ -635,7 +640,7 @@ function SettingsWindow(): React.JSX.Element {
     <div className="settings-shell">
       <aside className="settings-sidebar">
         <div className="settings-sidebar-brand">
-          <img src={logoUrl} alt="SightFlow" className="app-logo" />
+          <img src={logoUrl} alt="ChatBuddy" className="app-logo" />
           <span>设置</span>
         </div>
         <button
@@ -650,11 +655,134 @@ function SettingsWindow(): React.JSX.Element {
         >
           智能体
         </button>
+        {SHOW_TOKEN_COST && (
+          <button
+            className={`settings-nav-item ${section === 'usage' ? 'active' : ''}`}
+            onClick={() => setSection('usage')}
+          >
+            用量与费用
+          </button>
+        )}
       </aside>
 
       <main className="settings-main">
-        {section === 'base' ? <SettingsPanel /> : <AgentPanel />}
+        {section === 'base' ? (
+          <SettingsPanel />
+        ) : section === 'agent' ? (
+          <AgentPanel />
+        ) : SHOW_TOKEN_COST ? (
+          <UsagePanel />
+        ) : null}
       </main>
+    </div>
+  )
+}
+
+function UsageStat({ label, v }: { label: string; v?: UsageAgg }): React.JSX.Element {
+  return (
+    <div style={{ flex: 1, padding: 12, borderRadius: 10, background: 'rgba(127,127,127,0.08)' }}>
+      <div style={{ fontSize: 12, opacity: 0.7 }}>{label}</div>
+      <div style={{ fontSize: 20, fontWeight: 700, marginTop: 4 }}>{fmtYuan(v?.cost)}</div>
+      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+        {fmtNum(v?.calls)} 次 · 输入 {fmtNum(v?.inputTokens)} · 输出 {fmtNum(v?.outputTokens)}
+      </div>
+    </div>
+  )
+}
+
+function UsagePanel(): React.JSX.Element {
+  const [data, setData] = useState<UsageSummary | null>(null)
+
+  // 首次加载 + 5s 轮询；cancelled 防止卸载后迟到响应再 setState
+  useEffect(() => {
+    let cancelled = false
+    const load = (): void => {
+      window.electron
+        .invoke('usage:summary', 200)
+        .then((summary: UsageSummary) => {
+          if (!cancelled) setData(summary)
+        })
+        .catch(() => {
+          // 账本读取失败时保留上次数据，下轮轮询自动重试
+        })
+    }
+    load()
+    const t = setInterval(load, 5000)
+    return () => {
+      cancelled = true
+      clearInterval(t)
+    }
+  }, [])
+
+  const byPurpose: Record<string, UsageAgg> = data?.byPurpose ?? {}
+  const cell: React.CSSProperties = {
+    padding: '6px 8px',
+    borderBottom: '1px solid rgba(127,127,127,0.15)',
+    whiteSpace: 'nowrap'
+  }
+
+  return (
+    <div className="settings-page slide-up">
+      <div className="settings-page-header">
+        <div>
+          <h1>用量与费用</h1>
+          <p>按模型返回的 usage 逐次记录，费用按输入长度分档计价（doubao-seed-2-0-lite）。</p>
+        </div>
+        <button className="btn" onClick={() => window.electron.invoke('usage:openFolder')}>
+          打开账本文件夹
+        </button>
+      </div>
+
+      <div className="card">
+        <div style={{ display: 'flex', gap: 12 }}>
+          <UsageStat label="今日" v={data?.today} />
+          <UsageStat label="累计" v={data?.total} />
+        </div>
+        <div style={{ display: 'flex', gap: 12, marginTop: 12, flexWrap: 'wrap' }}>
+          {Object.entries(byPurpose).map(([k, v]) => (
+            <div key={k} style={{ fontSize: 12, opacity: 0.85 }}>
+              {PURPOSE_LABEL[k] || k}：{fmtNum(v.calls)} 次 / {fmtYuan(v.cost)}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="card-title">调用明细（最近 200 条）</div>
+        <div style={{ overflow: 'auto', maxHeight: 420 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ textAlign: 'left', opacity: 0.7 }}>
+                <th style={cell}>时间</th>
+                <th style={cell}>用途</th>
+                <th style={cell}>输入</th>
+                <th style={cell}>输出</th>
+                <th style={cell}>档位</th>
+                <th style={cell}>费用</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(data?.recent || []).map((r, i) => (
+                <tr key={i}>
+                  <td style={cell}>{new Date(r.ts).toLocaleString('zh-CN')}</td>
+                  <td style={cell}>{PURPOSE_LABEL[r.purpose] || r.purpose}</td>
+                  <td style={cell}>{fmtNum(r.inputTokens)}</td>
+                  <td style={cell}>{fmtNum(r.outputTokens)}</td>
+                  <td style={cell}>{r.tier}</td>
+                  <td style={cell}>{r.priced === false ? '—（未计价）' : fmtYuan(r.cost)}</td>
+                </tr>
+              ))}
+              {data && !data.recent?.length && (
+                <tr>
+                  <td style={cell} colSpan={6}>
+                    暂无记录，开始自动回复后会出现在这里。
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   )
 }
@@ -733,7 +861,8 @@ function SettingsPanel() {
 
         <div className="form-group">
           <label className="form-label">{t('settings.visionModel')}</label>
-          <input className="form-input" value="doubao-seed-2-0-lite-260215" disabled />
+          {/* 展示用字符串；模型名与 src/core/ai-client.ts 的 DEFAULT_MODEL 手动同步 */}
+          <input className="form-input" value="doubao-seed-2-0-lite-260428" disabled />
         </div>
 
         <div className="form-group">
@@ -774,7 +903,9 @@ function AgentPanel(): React.JSX.Element {
     try {
       const [settings, result] = await Promise.all([
         window.electron?.invoke('settings:getAll') as Promise<AppSettings | undefined>,
-        window.electron?.invoke(forceUpdate ? 'providerHub:update' : 'providerHub:getCatalog') as Promise<ProviderHubResult>
+        window.electron?.invoke(
+          forceUpdate ? 'providerHub:update' : 'providerHub:getCatalog'
+        ) as Promise<ProviderHubResult>
       ])
 
       const nextCatalog = mergeProviderCatalog(result?.catalog?.providers || [])
@@ -782,21 +913,36 @@ function AgentPanel(): React.JSX.Element {
       setCatalog(nextCatalog)
       setCurrentSettings(settings || null)
       setActiveId(nextActiveId)
-      setSelectedId((current) => current || nextActiveId || BUILTIN_PROVIDER_CATALOG[0]?.id || nextCatalog[0]?.id || '')
-      setProviderDrafts((prev) => ({
-        ...prev,
-        doubao: {
+      setSelectedId(
+        (current) =>
+          current || nextActiveId || BUILTIN_PROVIDER_CATALOG[0]?.id || nextCatalog[0]?.id || ''
+      )
+      setProviderDrafts((prev) => {
+        const next: Record<string, Record<string, string>> = { ...prev }
+        // 内置豆包：持久 config 回填后，apiKey 显式行放最后保护用户草稿（含主动清空的空串），
+        // 避免持久值在「更新列表」时覆盖用户未保存的清空操作
+        const doubaoPersisted = persistedDoubaoConfig(settings || null)
+        next.doubao = {
           ...getProviderDefaults(BUILTIN_PROVIDER_CATALOG[0]),
           ...(prev.doubao || {}),
-          ...(!settings?.chatProvider?.installed ? settings?.chatProvider?.config || {} : {}),
-          apiKey: prev.doubao?.apiKey || settings?.vision?.apiKey || ''
-        },
-        [nextActiveId]: {
-          ...getProviderDefaults(nextCatalog.find((provider) => provider.id === nextActiveId)),
-          ...(prev[nextActiveId] || {}),
-          ...(settings?.chatProvider?.config || {})
+          ...doubaoPersisted,
+          apiKey: prev.doubao?.apiKey ?? (doubaoPersisted.apiKey || '')
         }
-      }))
+        // 当前启用的 provider：installed 为 null 时 nextActiveId 恒为 'doubao'，
+        // 与上面的赋值同键，跳过以避免对象字面量双键覆盖
+        if (nextActiveId !== 'doubao') {
+          const persisted = settings?.chatProvider?.config || {}
+          const prevDraft = prev[nextActiveId] || {}
+          next[nextActiveId] = {
+            ...getProviderDefaults(nextCatalog.find((provider) => provider.id === nextActiveId)),
+            ...prevDraft,
+            ...persisted,
+            // 空串表示用户正在清空，刷新列表时不能被已保存的密钥盖回去
+            apiKey: prevDraft.apiKey ?? (persisted.apiKey || '')
+          }
+        }
+        return next
+      })
 
       if (result && !result.success) {
         showToast(`智能体列表加载失败: ${result.error || ''}`, 'error')
@@ -834,20 +980,36 @@ function AgentPanel(): React.JSX.Element {
 
   const persistProvider = useCallback(
     async (provider: ProviderCatalogItem, values: Record<string, string>) => {
-      const missing = getMissingRequiredFields(provider, values)
+      const nextValues = { ...values }
+      if (typeof nextValues.apiKey === 'string') nextValues.apiKey = nextValues.apiKey.trim()
+
+      const missing = getMissingRequiredFields(provider, nextValues)
       if (missing.length > 0) {
         showToast(`缺少必填项: ${missing.join('、')}`, 'error')
         return false
       }
 
+      // 豆包系（内置 doubao 或经 hub 安装的 volcengine-ark）apiKey 可留空回退视觉密钥；
+      // 实时读取设置判断（currentSettings 是内存快照，跨窗口改动后会过期）
+      const isDoubaoLike = provider.id === 'doubao' || provider.id === 'volcengine-ark'
+      if (isDoubaoLike) {
+        const latest = (await window.electron?.invoke('settings:getAll')) as
+          | AppSettings
+          | undefined
+        if (!nextValues.apiKey?.trim() && !latest?.vision?.apiKey?.trim()) {
+          showToast('请填写 API Key，或在基础配置中填写视觉密钥', 'error')
+          return false
+        }
+      }
+
       if (provider.id === 'doubao') {
-        const { apiKey, ...providerConfig } = values
+        // apiKey 留在 chatProvider.config 独立持久化（空串也落盘，
+        // 覆盖曾启用第三方 provider 残留的旧 key）；留空时运行时回退视觉密钥
         await window.electron?.invoke('settings:set', {
-          vision: { apiKey },
           chatProvider: {
             manifestUrl: '',
             installed: null,
-            config: providerConfig
+            config: nextValues
           }
         })
         const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings
@@ -857,7 +1019,10 @@ function AgentPanel(): React.JSX.Element {
         return true
       }
 
-      const installResult = await window.electron?.invoke('provider:installFromUrl', provider.manifestUrl)
+      const installResult = await window.electron?.invoke(
+        'provider:installFromUrl',
+        provider.manifestUrl
+      )
       if (!installResult?.success) {
         showToast(installResult?.error || '智能体安装失败', 'error')
         return false
@@ -867,7 +1032,7 @@ function AgentPanel(): React.JSX.Element {
         chatProvider: {
           manifestUrl: provider.manifestUrl,
           installed: installResult.installed,
-          config: values
+          config: nextValues
         }
       })
       const settings = (await window.electron?.invoke('settings:getAll')) as AppSettings
@@ -1060,6 +1225,16 @@ function getProviderDefaults(provider: ProviderCatalogItem | undefined): Record<
   }, {})
 }
 
+/** 内置豆包卡片要看到的持久配置：未安装，或当前装的就是火山方舟豆包。第三方的 config 不拿来填这张卡。 */
+function persistedDoubaoConfig(
+  settings: AppSettings | null
+): AppSettings['chatProvider']['config'] {
+  if (!settings) return {}
+  const installedId = settings.chatProvider.installed?.id
+  if (installedId && installedId !== 'volcengine-ark') return {}
+  return settings.chatProvider.config || {}
+}
+
 function getProviderValues(
   drafts: Record<string, Record<string, string>>,
   provider: ProviderCatalogItem | undefined,
@@ -1068,11 +1243,14 @@ function getProviderValues(
   if (!provider) return {}
   const defaults = getProviderDefaults(provider)
   if (provider.id === 'doubao') {
+    const persistedConfig = persistedDoubaoConfig(settings)
     return {
       ...defaults,
-      ...(settings?.chatProvider.installed ? {} : settings?.chatProvider.config || {}),
-      apiKey: drafts.doubao?.apiKey || settings?.vision.apiKey || '',
-      ...(drafts.doubao || {})
+      ...persistedConfig,
+      ...(drafts.doubao || {}),
+      // 显式回退必须放在展开之后：draft 的 apiKey（含用户主动清空的空串）优先，
+      // 仅当 draft 尚不存在时才取聊天侧持久值，避免空串覆盖回退值
+      apiKey: drafts.doubao?.apiKey ?? (persistedConfig.apiKey || '')
     }
   }
   return {
@@ -1087,7 +1265,13 @@ function getMissingRequiredFields(
   values: Record<string, string>
 ): string[] {
   return provider.configSchema.fields
-    .filter((field) => field.required && !values[field.key]?.trim())
+    .filter(
+      (field) =>
+        field.required &&
+        !values[field.key]?.trim() &&
+        // hub 豆包（volcengine-ark）的 apiKey 运行时回退视觉密钥，与主进程豁免保持一致
+        !(provider.id === 'volcengine-ark' && field.key === 'apiKey')
+    )
     .map((field) => field.label)
 }
 

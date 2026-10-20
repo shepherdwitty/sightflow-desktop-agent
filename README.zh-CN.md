@@ -160,7 +160,7 @@ npm run build:linux   # Linux
 1. 前往 [火山引擎控制台 · 方舟原生接口](https://console.volcengine.com/ark) 开通相关服务，并生成 / 获取你的 API Key。
 2. 启动项目后点击主界面右下角的设置按钮，打开独立设置窗口。
 3. 在 **基础配置** 中填写 API Key。默认 Base URL 为 `https://ark.cn-beijing.volces.com/api/v3`，通常无需修改。
-4. 在 **智能体** 中选择当前使用的 Provider。内置默认智能体为 **豆包 Seed**，模型固定为 `doubao-seed-2-0-lite-260215`。
+4. 在 **智能体** 中选择当前使用的 Provider。内置默认智能体为 **豆包 Seed**，模型固定为 `doubao-seed-2-0-lite-260428`。
 
 ### 界面预览
 

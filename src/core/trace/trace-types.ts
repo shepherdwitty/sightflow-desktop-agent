@@ -6,6 +6,7 @@
 // schema 字段与 docs/plan/learn-work-memory-plan.md 第三节一一对应。
 
 import { AppType } from '../rpa/types'
+import type { StepUsage } from '../usage/usage-ledger'
 
 export type TraceActor = 'agent' | 'human'
 export type TracePhase = 'observe' | 'think' | 'act' | 'verify'
@@ -56,6 +57,8 @@ export interface TraceStep {
   reasoning?: TraceReasoning
   action?: TraceAction
   outcome?: TraceOutcome
+  /** 本步归属的模型算力消耗（token + 计费模拟），结构见 usage-ledger 的 StepUsage */
+  usage?: StepUsage
 }
 
 /**
@@ -71,6 +74,15 @@ export interface TraceStepInput {
   reasoning?: TraceReasoning
   action?: TraceAction
   outcome?: TraceOutcome
+  /**
+   * 这一步已经算好的模型用量（视觉检测包在 captureUsage 里）。
+   * 与 claimPendingUsage 同时存在时，用这个，不再去拿全局 pending。
+   */
+  usage?: StepUsage
+  /**
+   * 取走尚未归属的 reply pending。只给「模型调用已经返回」的那条轨迹设。
+   */
+  claimPendingUsage?: boolean
 }
 
 /** 注入给 Provider 的经验卡片摘要（完整卡片定义见 memory/experience-store.ts） */

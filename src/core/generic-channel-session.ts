@@ -7,6 +7,7 @@
 
 import { DesktopDevice } from './device'
 import { ChannelContext, ChannelSession, ProviderEvent, SessionEvent } from './session-types'
+import { captureUsage, mergeStepUsage, type StepUsage } from './usage/usage-ledger'
 
 export interface GenericChannelState {
   measuredAt: number | null
@@ -23,6 +24,8 @@ export function createInitialGenericChannelState(): GenericChannelState {
 export class GenericChannelSession implements ChannelSession<GenericChannelState> {
   private readonly retryDelayMs = 5000
   private consecutiveUnreadFailures = 0
+  /** provider 在请求发出前就 yield 的「正在分析」。等调用返回后再落轨迹，用量才能挂在这一步上。 */
+  private deferredThink: string | null = null
 
   constructor(private readonly device: DesktopDevice) {}
 
@@ -30,6 +33,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
     this.device.setAppType(ctx.appType)
     this.device.clearChatBaseline()
     this.consecutiveUnreadFailures = 0
+    this.deferredThink = null
     this.resetState(ctx.state)
     await this.device.onSessionStart?.()
     ctx.host.enqueue({ type: 'bootstrap' })
@@ -38,6 +42,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
   async onStop(ctx: ChannelContext<GenericChannelState>): Promise<void> {
     this.device.clearChatBaseline()
     this.consecutiveUnreadFailures = 0
+    this.deferredThink = null
     await this.device.onSessionStop?.()
     this.resetState(ctx.state)
   }
@@ -49,7 +54,8 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
       case 'bootstrap': {
         ctx.host.log('thinking', '正在识别聊天窗口布局...')
         const measureStart = Date.now()
-        const result = await this.device.measureLayout()
+        const measured = await captureUsage(() => this.device.measureLayout())
+        const result = measured.value
 
         if (!result.success) {
           ctx.host.log('error', `${result.error || '界面识别失败'}，引擎无法启动`)
@@ -61,7 +67,8 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
               status: 'fail',
               detail: result.error || '界面识别失败',
               latencyMs: Date.now() - measureStart
-            }
+            },
+            usage: measured.usage
           })
           await ctx.host.stopSession('bootstrap_failed')
           return
@@ -73,7 +80,8 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
           phase: 'observe',
           summary: '识别聊天窗口布局',
           action: { kind: 'measure' },
-          outcome: { status: 'ok', latencyMs: Date.now() - measureStart }
+          outcome: { status: 'ok', latencyMs: Date.now() - measureStart },
+          usage: measured.usage
         })
         ctx.host.enqueue({ type: 'observe_chat' })
         break
@@ -92,14 +100,11 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
 
       case 'provider.thinking':
         ctx.host.log('thinking', event.content)
-        ctx.host.trace({
-          phase: 'think',
-          summary: event.content,
-          reasoning: { content: event.content }
-        })
+        this.deferredThink = event.content
         break
 
       case 'provider.reply_text': {
+        const claimedByThink = this.traceDeferredThink(ctx)
         const sendStart = Date.now()
         await this.device.sendMessage(event.content)
         ctx.host.log('reply', event.content)
@@ -107,7 +112,8 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
           phase: 'act',
           summary: '发送回复',
           action: { kind: 'send', payload: event.content },
-          outcome: { status: 'ok', latencyMs: Date.now() - sendStart }
+          outcome: { status: 'ok', latencyMs: Date.now() - sendStart },
+          claimPendingUsage: !claimedByThink
         })
         await this.device.setChatBaseline()
         ctx.state.latestChatBaseline = Date.now()
@@ -117,11 +123,15 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
 
       case 'provider.skip':
         ctx.host.log('skip', '本轮无需回复')
-        ctx.host.trace({
-          phase: 'think',
-          summary: '判断本轮无需回复',
-          outcome: { status: 'skip' }
-        })
+        {
+          const claimedByThink = this.traceDeferredThink(ctx)
+          ctx.host.trace({
+            phase: 'think',
+            summary: '判断本轮无需回复',
+            outcome: { status: 'skip' },
+            claimPendingUsage: !claimedByThink
+          })
+        }
         await this.device.setChatBaseline()
         ctx.state.latestChatBaseline = Date.now()
         ctx.host.enqueue({ type: 'check_unread' })
@@ -129,11 +139,15 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
 
       case 'provider.error':
         ctx.host.log('error', `回复服务异常：${event.error}`)
-        ctx.host.trace({
-          phase: 'think',
-          summary: '回复服务异常',
-          outcome: { status: 'fail', detail: event.error }
-        })
+        {
+          const claimedByThink = this.traceDeferredThink(ctx)
+          ctx.host.trace({
+            phase: 'think',
+            summary: '回复服务异常',
+            outcome: { status: 'fail', detail: event.error },
+            claimPendingUsage: !claimedByThink
+          })
+        }
         ctx.host.enqueue({
           type: 'wait_retry',
           reason: 'provider_error',
@@ -154,7 +168,8 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
           break
         }
 
-        const unreadResult = await this.device.hasUnreadMessage()
+        const unread = await captureUsage(() => this.device.hasUnreadMessage())
+        const unreadResult = unread.value
         if (!unreadResult.hasUnread) {
           ctx.host.enqueue({
             type: 'wait_retry',
@@ -180,7 +195,8 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
           phase: 'act',
           summary: '点击未读会话入口',
           action: { kind: 'click', target: chatEntranceCoords },
-          outcome: { status: 'ok' }
+          outcome: { status: 'ok' },
+          usage: unread.usage
         })
         await this.device.activeUnreadByClick(chatEntranceCoords)
         await this.sleep(150 + Math.random() * 100)
@@ -254,13 +270,18 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
   private async tryOpenUnreadConversation(
     ctx: ChannelContext<GenericChannelState>
   ): Promise<'opened' | 'contact_not_ready'> {
-    let contactResult = await this.device.isChatContactUnread()
+    const visionUsages: Array<StepUsage | undefined> = []
+    const contact = await captureUsage(() => this.device.isChatContactUnread())
+    visionUsages.push(contact.usage)
+    let contactResult = contact.value
 
     if (!contactResult.isUnread) {
       ctx.host.log('thinking', '当前会话没有新消息，正在重新检测...')
       await this.sleep(1000)
 
-      const recheckResult = await this.device.hasUnreadMessage()
+      const recheck = await captureUsage(() => this.device.hasUnreadMessage())
+      visionUsages.push(recheck.usage)
+      const recheckResult = recheck.value
       const recheckCoords = recheckResult.chatEntranceArea?.coordinates
 
       if (!recheckResult.hasUnread || !recheckCoords) {
@@ -271,7 +292,9 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
       ctx.host.log('thinking', '仍检测到未读消息，正在再次尝试打开会话')
       await this.device.activeUnreadByClick(recheckCoords)
       await this.sleep(500)
-      contactResult = await this.device.isChatContactUnread()
+      const contactAgain = await captureUsage(() => this.device.isChatContactUnread())
+      visionUsages.push(contactAgain.usage)
+      contactResult = contactAgain.value
     }
 
     if (!contactResult.isUnread) {
@@ -286,10 +309,14 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
         this.consecutiveUnreadFailures = 0
         await this.sleep(500)
 
-        contactResult = await this.device.isChatContactUnread()
+        const contactAfterReset = await captureUsage(() => this.device.isChatContactUnread())
+        visionUsages.push(contactAfterReset.usage)
+        contactResult = contactAfterReset.value
         if (!contactResult.isUnread) {
           ctx.host.log('thinking', '重置后仍未成功，正在再次尝试打开会话')
-          const retryUnread = await this.device.hasUnreadMessage()
+          const retryUnreadCaptured = await captureUsage(() => this.device.hasUnreadMessage())
+          visionUsages.push(retryUnreadCaptured.usage)
+          const retryUnread = retryUnreadCaptured.value
           const retryCoords = retryUnread.chatEntranceArea?.coordinates
 
           if (!retryUnread.hasUnread || !retryCoords) {
@@ -299,7 +326,9 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
 
           await this.device.activeUnreadByClick(retryCoords)
           await this.sleep(500)
-          contactResult = await this.device.isChatContactUnread()
+          const contactAfterRetry = await captureUsage(() => this.device.isChatContactUnread())
+          visionUsages.push(contactAfterRetry.usage)
+          contactResult = contactAfterRetry.value
 
           if (!contactResult.isUnread) {
             ctx.host.log('skip', '最终检测仍失败，放弃当前轮未读切换')
@@ -327,13 +356,28 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
       phase: 'act',
       summary: '打开未读会话',
       action: { kind: 'click', target: contactResult.firstContactCoords },
-      outcome: { status: 'ok' }
+      outcome: { status: 'ok' },
+      usage: mergeStepUsage(visionUsages)
     })
     await this.device.clickUnreadContact(contactResult.firstContactCoords)
     await this.sleep(500 + Math.random() * 300)
     this.device.clearChatBaseline()
     ctx.state.latestChatBaseline = null
     return 'opened'
+  }
+
+  /** 把请求前的「正在分析」落成轨迹，并领走这次 reply 的用量。没有延迟中的分析步时返回 false。 */
+  private traceDeferredThink(ctx: ChannelContext<GenericChannelState>): boolean {
+    const summary = this.deferredThink
+    if (!summary) return false
+    this.deferredThink = null
+    ctx.host.trace({
+      phase: 'think',
+      summary,
+      reasoning: { content: summary },
+      claimPendingUsage: true
+    })
+    return true
   }
 
   private sleep(ms: number): Promise<void> {

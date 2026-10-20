@@ -16,6 +16,7 @@ const FALLBACK_PORT = 12681
 
 export type SkillStartReason =
   | 'no_vision_key'
+  | 'no_chat_key'
   | 'no_provider'
   | 'missing_required_field'
   | 'engine_failed'
@@ -85,6 +86,7 @@ function readBody(req: http.IncomingMessage): Promise<string> {
 const START_STATUS_MAP: Record<SkillStartReason, number> = {
   already_running: 409,
   no_vision_key: 400,
+  no_chat_key: 400,
   no_provider: 400,
   missing_required_field: 400,
   engine_failed: 500,

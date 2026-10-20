@@ -1,3 +1,4 @@
+import { recordUsage, type ApiUsage } from '../core/usage/usage-ledger'
 import { app } from 'electron'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -77,13 +78,23 @@ interface ProviderBundleModule {
           run(input: ProviderInput): AsyncIterable<ProviderEvent>
         }
       }
-    | ((context: ProviderBundleContext) => { run(input: ProviderInput): AsyncIterable<ProviderEvent> })
+    | ((context: ProviderBundleContext) => {
+        run(input: ProviderInput): AsyncIterable<ProviderEvent>
+      })
 }
 
 export interface ProviderBundleContext {
   providerConfig: Record<string, any>
   host: {
     log(message: string): void
+    recordUsage?(data: {
+      purpose: string
+      model: string
+      usage: ApiUsage
+      requestId?: string
+      /** 是否归属到轨迹步骤；缺省按 purpose 推断（reply / vision 归属） */
+      attributable?: boolean
+    }): void
     platform: string
     appVersion: string
   }
@@ -170,7 +181,7 @@ export async function getInstalledProviderManifest(
   }
 }
 
-/** 读取内置 doubao 的原始 manifest（保留 apiKey 字段，供调试 / 校验） */
+/** 读取内置 doubao 的原始 manifest（apiKey 非必填，留空时运行时回退视觉密钥） */
 export async function getBuiltinDoubaoManifestRaw(): Promise<ProviderBundleManifest | null> {
   const dir = getBuiltinProviderDir(BUILTIN_DOUBAO_PROVIDER_ID)
   const manifestFile = path.join(dir, 'manifest.json')
@@ -183,29 +194,12 @@ export async function getBuiltinDoubaoManifestRaw(): Promise<ProviderBundleManif
 }
 
 /**
- * 拿到对外暴露的内置 doubao manifest：
- * - 移除 `apiKey` 字段（与视觉密钥共享，不需要用户重复填写）
- * - 同步从 required 列表里移除 apiKey
+ * 拿到对外暴露的内置 doubao manifest。
+ * apiKey 字段保留但非必填（manifest.json 已将其移出 required）：
+ * 留空时运行时回退视觉密钥，填写后聊天服务使用此独立密钥。
  */
 export async function getBuiltinDoubaoManifestForUi(): Promise<ProviderBundleManifest | null> {
-  const raw = await getBuiltinDoubaoManifestRaw()
-  if (!raw) return null
-
-  const properties: Record<string, ProviderSchemaField> = {}
-  for (const [key, field] of Object.entries(raw.configSchema.properties)) {
-    if (key === 'apiKey') continue
-    properties[key] = field
-  }
-  const required = (raw.configSchema.required || []).filter((k) => k !== 'apiKey')
-
-  return {
-    ...raw,
-    configSchema: {
-      type: 'object',
-      properties,
-      required
-    }
-  }
+  return getBuiltinDoubaoManifestRaw()
 }
 
 /** 内置 doubao 的虚拟 installed 描述（用于 provider:getInstalled 的回退） */
@@ -296,6 +290,9 @@ export async function loadInstalledProvider(
     providerConfig,
     host: {
       log: (message: string) => console.log(`[ProviderBundle:${manifest.id}] ${message}`),
+      recordUsage: (data) => {
+        recordUsage({ ...data, source: `provider:${manifest.id}` })
+      },
       platform: process.platform,
       appVersion: app.getVersion()
     }
@@ -311,7 +308,10 @@ export async function loadInstalledProvider(
   }
 }
 
-async function loadProviderBundleModule(entryFile: string, manifest: ProviderBundleManifest): Promise<ProviderBundleModule> {
+async function loadProviderBundleModule(
+  entryFile: string,
+  manifest: ProviderBundleManifest
+): Promise<ProviderBundleModule> {
   if (shouldUseEsmLoader(manifest, entryFile)) {
     // ESM has no writable require cache, so append a query string to force a fresh module instance.
     const entryUrl = pathToFileURL(entryFile)
@@ -325,9 +325,7 @@ async function loadProviderBundleModule(entryFile: string, manifest: ProviderBun
   return runtimeRequire(resolvedEntry) as ProviderBundleModule
 }
 
-function resolveCreateProvider(
-  loaded: ProviderBundleModule
-):
+function resolveCreateProvider(loaded: ProviderBundleModule):
   | ((context: ProviderBundleContext) => {
       run(input: ProviderInput): AsyncIterable<ProviderEvent>
     })
@@ -336,7 +334,11 @@ function resolveCreateProvider(
     return loaded.createProvider
   }
 
-  if (loaded.default && typeof loaded.default === 'object' && typeof loaded.default.createProvider === 'function') {
+  if (
+    loaded.default &&
+    typeof loaded.default === 'object' &&
+    typeof loaded.default.createProvider === 'function'
+  ) {
     return loaded.default.createProvider
   }
 
@@ -383,15 +385,27 @@ function validateManifest(input: any): ProviderBundleManifest {
   if (typeof input.entry !== 'string' || !input.entry.trim()) {
     throw new Error('Manifest 缺少有效 entry')
   }
-  if (input.moduleType !== undefined && input.moduleType !== 'module' && input.moduleType !== 'commonjs') {
+  if (
+    input.moduleType !== undefined &&
+    input.moduleType !== 'module' &&
+    input.moduleType !== 'commonjs'
+  ) {
     throw new Error('Manifest moduleType 仅支持 "module" 或 "commonjs"')
   }
-  if (!Array.isArray(input.capabilities) || input.capabilities.length !== 1 || input.capabilities[0] !== 'chat') {
+  if (
+    !Array.isArray(input.capabilities) ||
+    input.capabilities.length !== 1 ||
+    input.capabilities[0] !== 'chat'
+  ) {
     throw new Error('Manifest capabilities 仅支持 ["chat"]')
   }
 
   const configSchema = input.configSchema
-  if (!configSchema || configSchema.type !== 'object' || typeof configSchema.properties !== 'object') {
+  if (
+    !configSchema ||
+    configSchema.type !== 'object' ||
+    typeof configSchema.properties !== 'object'
+  ) {
     throw new Error('Manifest 缺少有效 configSchema')
   }
 
@@ -406,7 +420,10 @@ function validateManifest(input: any): ProviderBundleManifest {
       throw new Error(`字段 ${key} 缺少 title`)
     }
     if (field.type === 'select') {
-      if (!Array.isArray(field.enum) || field.enum.some((value: unknown) => typeof value !== 'string')) {
+      if (
+        !Array.isArray(field.enum) ||
+        field.enum.some((value: unknown) => typeof value !== 'string')
+      ) {
         throw new Error(`字段 ${key} 的 enum 无效`)
       }
     }

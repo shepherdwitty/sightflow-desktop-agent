@@ -160,7 +160,7 @@ Desktop configuration has two layers:
 1. Open [Volcengine Console → Ark](https://console.volcengine.com/ark), enable the service, and generate your API key.
 2. Launch the app and click the settings button at the bottom-right of the main window.
 3. Under **Base configuration**, enter the API key. The default Base URL `https://ark.cn-beijing.volces.com/api/v3` rarely needs changing.
-4. Under **Agent**, select the active Provider. The built-in default is **Doubao Seed** (`doubao-seed-2-0-lite-260215`).
+4. Under **Agent**, select the active Provider. The built-in default is **Doubao Seed** (`doubao-seed-2-0-lite-260428`).
 
 ### Interface preview
 

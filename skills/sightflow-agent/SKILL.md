@@ -14,7 +14,7 @@ metadata: {"openclaw":{"emoji":"👁️","requires":{"os":["macos","windows"]}}}
 ## 前置条件
 
 - SightFlow 桌面客户端必须已经启动并运行
-- 已在「设置」中填写视觉接口密钥 (Vision API Key)
+- 豆包聊天密钥和视觉密钥至少要有一把。聊天密钥留空时使用视觉密钥。抓取策略是 VLM 时，视觉密钥仍然必填
 - 已安装并配置好聊天 Provider（如火山方舟）
 
 ## API 端点
@@ -42,9 +42,10 @@ curl -s -X POST http://127.0.0.1:12680/skill/start
 **错误码：**
 | error_code | 含义 |
 |---|---|
-| `no_vision_key` | 未配置视觉接口密钥，请先在设置中填写 |
+| `no_chat_key` | 豆包聊天密钥和视觉密钥都是空的 |
+| `no_vision_key` | 当前抓取策略需要视觉接口密钥，但还没填写 |
 | `no_provider` | 未安装聊天 Provider，请先安装 |
-| `missing_required_field` | Provider 必填配置缺失（如 apiKey） |
+| `missing_required_field` | Provider 必填配置缺失 |
 | `engine_failed` | 引擎启动失败 |
 | `already_running` | 智能体已在运行中 |
 | `operation_in_progress` | 有其他启动 / 暂停操作正在执行 |
@@ -77,5 +78,5 @@ curl -s -X POST http://127.0.0.1:12680/skill/pause
 - 所有请求都是本地请求（127.0.0.1），无需网络
 - 启动 / 暂停操作有并发保护，同一时间只能执行一个操作
 - 远程启动 / 暂停后，桌面客户端 UI 会同步切换到对应状态
-- 如果返回 `no_vision_key` / `no_provider` / `missing_required_field`，需要用户在桌面客户端「设置」中补全配置
+- 如果返回 `no_chat_key` / `no_vision_key` / `no_provider` / `missing_required_field`，需要用户在桌面客户端「设置」中补全配置
 - 端口 12680 如果被占用，应用会 fallback 到 12681

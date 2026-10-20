@@ -1,4 +1,4 @@
-const DEFAULT_MODEL = 'doubao-seed-2-0-lite-260215'
+const DEFAULT_MODEL = 'doubao-seed-2-0-lite-260428'
 const DEFAULT_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
 const DEFAULT_PROMPT = `你是一个微信自动回复助手。你会收到一张微信/企业微信的聊天窗口截图。
 
@@ -46,7 +46,8 @@ export function createProvider(context) {
           screenshot: input.screenshot,
           apiKey,
           model: providerConfig.model || DEFAULT_MODEL,
-          systemPrompt: (providerConfig.systemPrompt || DEFAULT_PROMPT) + memorySection
+          systemPrompt: (providerConfig.systemPrompt || DEFAULT_PROMPT) + memorySection,
+          host: context && context.host
         })
 
         if (!reply || reply.trim() === '[SKIP]') {
@@ -66,7 +67,7 @@ export function createProvider(context) {
   }
 }
 
-async function requestReply({ screenshot, apiKey, model, systemPrompt }) {
+async function requestReply({ screenshot, apiKey, model, systemPrompt, host }) {
   const body = {
     model,
     messages: [
@@ -97,6 +98,9 @@ async function requestReply({ screenshot, apiKey, model, systemPrompt }) {
   }
 
   const json = await response.json()
+  if (host && typeof host.recordUsage === 'function' && json && json.usage) {
+    host.recordUsage({ purpose: 'reply', model: json.model || model, usage: json.usage, requestId: json.id })
+  }
   return json && json.choices && json.choices[0] && json.choices[0].message
     ? json.choices[0].message.content || ''
     : ''
