@@ -26,8 +26,11 @@ import {
   activeUnreadByClickAction,
   clickUnreadContactAction,
   defaultClickPolicy,
+  sendFailure,
+  sendImageByCoordsAction,
   sendReplyByCoordsAction
 } from './rpa/input-utils'
+import type { PacingPolicy } from './shift/pacing'
 import { comparePngBuffers } from './rpa/image-compare'
 
 function rectCenter(rect: ScreenRect): [number, number] {
@@ -48,7 +51,7 @@ export class BoxSelectDevice implements DesktopDevice {
   }
 
   // BoxSelectDevice 不需要视觉密钥；保留 no-op 以满足接口（engine:updateConfig 会调）。
-  setApiKey(apiKey: string): void {
+  setApiKey(apiKey: string, _baseURL?: string): void {
     void apiKey
   }
 
@@ -180,12 +183,20 @@ export class BoxSelectDevice implements DesktopDevice {
 
   // ── 动作层 ──
 
-  async sendMessage(text: string): Promise<void> {
+  async sendMessage(text: string, pacing?: PacingPolicy, alive?: () => boolean): Promise<void> {
     const inputArea = getInputAreaFromCache(this.appType)
     if (!inputArea) throw new Error('尚未测量输入框区域')
     const [x, y] = inputArea.coordinates
-    const ok = await sendReplyByCoordsAction(x, y, text)
-    if (!ok) throw new Error('发送消息失败')
+    const ok = await sendReplyByCoordsAction(x, y, text, pacing, alive)
+    if (!ok) throw sendFailure(alive)
+  }
+
+  async sendImage(filePath: string, pacing?: PacingPolicy, alive?: () => boolean): Promise<void> {
+    const inputArea = getInputAreaFromCache(this.appType)
+    if (!inputArea) throw new Error('尚未测量输入框区域')
+    const [x, y] = inputArea.coordinates
+    const ok = await sendImageByCoordsAction(x, y, filePath, pacing, alive)
+    if (!ok) throw sendFailure(alive, '发送图片失败')
   }
 
   // 通用 IM 一般单击就能切换会话，统一走 defaultClickPolicy(appType)，

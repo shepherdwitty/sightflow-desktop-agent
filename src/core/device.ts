@@ -10,12 +10,13 @@
 // 两条路径后续都通过 LayoutCache 消费位置。
 
 import { AppType } from './rpa/types'
+import { PacingPolicy } from './shift/pacing'
 import { BBox } from './rpa/vision-utils'
 
 export interface DesktopDevice {
   // ── 配置 ──
   setAppType(appType: AppType): void
-  setApiKey(apiKey: string): void
+  setApiKey(apiKey: string, baseURL?: string): void
 
   // ── 生命周期 ──
   // session 启停时由 GenericChannelSession 调用，给设备机会做缓存初始化 / 清理。
@@ -80,8 +81,11 @@ export interface DesktopDevice {
 
   // ── 动作层 ──
 
-  /** 发送消息（clipboard paste + enter） */
-  sendMessage(text: string): Promise<void>
+  /** 发送消息。传入节奏时按段打字，不传则整段粘贴。alive 变 false 时停在下一次回车之前。 */
+  sendMessage(text: string, pacing?: PacingPolicy, alive?: () => boolean): Promise<void>
+
+  /** 把本机图片贴进当前输入框并发送。 */
+  sendImage?(filePath: string, pacing?: PacingPolicy, alive?: () => boolean): Promise<void>
 
   /**
    * 点击红点区域激活未读消息（视觉路线）

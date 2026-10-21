@@ -5,7 +5,7 @@
 // 事件实时推送新步骤，打开本窗口可以看着轨迹一条条长出来。
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { SHOW_TOKEN_COST } from './feature-flags'
+import { COMMERCIAL, SHOW_TOKEN_COST } from './feature-flags'
 import { PURPOSE_LABEL } from './usage-ui'
 import logoUrl from './assets/logo.svg'
 import { showToast } from './App'
@@ -351,7 +351,8 @@ function TraceView({
         <div>
           <h1>{formatDateTime(session.startedAt)}</h1>
           <p>
-            {session.appType} · {session.model || session.providerId || '未知模型'} · {steps.length}{' '}
+            {session.appType}
+            {COMMERCIAL ? '' : ` · ${session.model || session.providerId || '未知模型'}`} · {steps.length}{' '}
             步{session.endedAt ? '' : ' · 进行中'}
           </p>
         </div>

@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
-import { SHOW_TOKEN_COST } from './feature-flags'
+import { COMMERCIAL, SHOW_TOKEN_COST } from './feature-flags'
+import { DutyAgentPage, DutyCard, DutyConnectionPage, DutyRecordPage, DutyShiftPage } from './duty-ui'
 import { PURPOSE_LABEL, fmtYuan, fmtNum, type UsageAgg, type UsageSummary } from './usage-ui'
 import { t } from './i18n'
 import logoUrl from './assets/logo.svg'
@@ -13,7 +14,7 @@ interface LogEntry {
 }
 
 type EngineStatus = 'idle' | 'running' | 'error'
-type SettingsSection = 'base' | 'agent' | 'usage'
+type SettingsSection = 'base' | 'agent' | 'usage' | 'duty' | 'record' | 'connection' | 'post'
 type AppType = 'wechat' | 'wework' | 'dingtalk' | 'lark' | 'slack' | 'telegram' | 'generic'
 
 type CaptureStrategy = 'auto' | 'vlm' | 'box-select'
@@ -136,6 +137,10 @@ interface AppSettings {
   }
   defaultCaptureStrategy: CaptureStrategy
   capture: Partial<Record<AppType, PerAppCapture>>
+  licenseCode?: string
+  gatewayUrl?: string
+  allowAuto?: boolean
+  inputBackend?: 'software' | 'usb'
 }
 
 const BUILTIN_PROVIDER_CATALOG: ProviderCatalogItem[] = [
@@ -412,6 +417,8 @@ function ControlPanel({
         onOpenWizard={handleOpenWizard}
       />
 
+      <DutyCard onToast={showToast} />
+
       <div className="card">
         <div className="card-title">{t('control.log')}</div>
         <div className="message-log" ref={logRef}>
@@ -567,7 +574,7 @@ function BottomBar({
       providerInfo?.isBuiltinDefault || providerInfo?.installed?.id === 'volcengine-ark'
     const chatExplicit = settings?.chatProvider?.config?.apiKey?.trim() || ''
     const visionKey = settings?.vision?.apiKey?.trim() || ''
-    if (isDoubaoPath && !chatExplicit && !visionKey) {
+    if (!COMMERCIAL && isDoubaoPath && !chatExplicit && !visionKey) {
       showToast('请填写智能体 API Key，或在基础配置中填写视觉密钥', 'error')
       return
     }
@@ -579,7 +586,7 @@ function BottomBar({
       const value = settings?.chatProvider?.config?.[key]
       return value === undefined || value === null || value === ''
     })
-    if (missing) {
+    if (!COMMERCIAL && missing) {
       showToast(`${t('control.start.missingProviderField')}: ${missing}`, 'error')
       return
     }
@@ -634,7 +641,7 @@ function BottomBar({
 }
 
 function SettingsWindow(): React.JSX.Element {
-  const [section, setSection] = useState<SettingsSection>('base')
+  const [section, setSection] = useState<SettingsSection>(COMMERCIAL ? 'duty' : 'base')
 
   return (
     <div className="settings-shell">
@@ -643,18 +650,48 @@ function SettingsWindow(): React.JSX.Element {
           <img src={logoUrl} alt="ChatBuddy" className="app-logo" />
           <span>设置</span>
         </div>
+        {COMMERCIAL ? null : (
+          <button
+            className={`settings-nav-item ${section === 'base' ? 'active' : ''}`}
+            onClick={() => setSection('base')}
+          >
+            基础配置
+          </button>
+        )}
         <button
-          className={`settings-nav-item ${section === 'base' ? 'active' : ''}`}
-          onClick={() => setSection('base')}
+          className={`settings-nav-item ${section === 'duty' ? 'active' : ''}`}
+          onClick={() => setSection('duty')}
         >
-          基础配置
+          当班
         </button>
         <button
-          className={`settings-nav-item ${section === 'agent' ? 'active' : ''}`}
-          onClick={() => setSection('agent')}
+          className={`settings-nav-item ${section === 'post' ? 'active' : ''}`}
+          onClick={() => setSection('post')}
         >
-          智能体
+          {COMMERCIAL ? '智能体' : '岗位'}
         </button>
+        {COMMERCIAL ? null : (
+          <button
+            className={`settings-nav-item ${section === 'agent' ? 'active' : ''}`}
+            onClick={() => setSection('agent')}
+          >
+            智能体
+          </button>
+        )}
+        <button
+          className={`settings-nav-item ${section === 'record' ? 'active' : ''}`}
+          onClick={() => setSection('record')}
+        >
+          记录
+        </button>
+        {COMMERCIAL ? (
+          <button
+            className={`settings-nav-item ${section === 'connection' ? 'active' : ''}`}
+            onClick={() => setSection('connection')}
+          >
+            连接
+          </button>
+        ) : null}
         {SHOW_TOKEN_COST && (
           <button
             className={`settings-nav-item ${section === 'usage' ? 'active' : ''}`}
@@ -668,8 +705,16 @@ function SettingsWindow(): React.JSX.Element {
       <main className="settings-main">
         {section === 'base' ? (
           <SettingsPanel />
+        ) : section === 'duty' ? (
+          <DutyShiftPage onToast={showToast} />
+        ) : section === 'post' ? (
+          <DutyAgentPage onToast={showToast} />
         ) : section === 'agent' ? (
           <AgentPanel />
+        ) : section === 'record' ? (
+          <DutyRecordPage onToast={showToast} />
+        ) : section === 'connection' ? (
+          <DutyConnectionPage onToast={showToast} />
         ) : SHOW_TOKEN_COST ? (
           <UsagePanel />
         ) : null}
@@ -859,16 +904,20 @@ function SettingsPanel() {
           <div className="form-hint">{t('settings.visionApiKey.hint')}</div>
         </div>
 
-        <div className="form-group">
-          <label className="form-label">{t('settings.visionModel')}</label>
-          {/* 展示用字符串；模型名与 src/core/ai-client.ts 的 DEFAULT_MODEL 手动同步 */}
-          <input className="form-input" value="doubao-seed-2-0-lite-260428" disabled />
-        </div>
+        {COMMERCIAL ? null : (
+          <>
+            <div className="form-group">
+              <label className="form-label">{t('settings.visionModel')}</label>
+              {/* 展示用字符串；模型名与 src/core/ai-client.ts 的 DEFAULT_MODEL 手动同步 */}
+              <input className="form-input" value="doubao-seed-2-0-lite-260428" disabled />
+            </div>
 
-        <div className="form-group">
-          <label className="form-label">{t('settings.visionBaseUrl')}</label>
-          <input className="form-input" value="https://ark.cn-beijing.volces.com/api/v3" disabled />
-        </div>
+            <div className="form-group">
+              <label className="form-label">{t('settings.visionBaseUrl')}</label>
+              <input className="form-input" value="https://ark.cn-beijing.volces.com/api/v3" disabled />
+            </div>
+          </>
+        )}
 
         <div style={{ display: 'flex', gap: 8 }}>
           <button

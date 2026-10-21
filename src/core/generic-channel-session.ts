@@ -6,7 +6,11 @@
 // 里，使 channel session 在不同设备之间真正可复用。
 
 import { DesktopDevice } from './device'
+import type { ConversationKind } from './memory/conversation-key'
 import { ChannelContext, ChannelSession, ProviderEvent, SessionEvent } from './session-types'
+import type { ShiftController } from './shift/controller'
+import type { TurnAction } from './shift/decide-turn'
+import { planConfirm, planObserve } from './shift/turn-dispatch'
 import { captureUsage, mergeStepUsage, type StepUsage } from './usage/usage-ledger'
 
 export interface GenericChannelState {
@@ -26,8 +30,12 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
   private consecutiveUnreadFailures = 0
   /** provider 在请求发出前就 yield 的「正在分析」。等调用返回后再落轨迹，用量才能挂在这一步上。 */
   private deferredThink: string | null = null
+  private replyFailed = false
 
-  constructor(private readonly device: DesktopDevice) {}
+  constructor(
+    private readonly device: DesktopDevice,
+    private readonly shift?: ShiftController
+  ) {}
 
   async onStart(ctx: ChannelContext<GenericChannelState>): Promise<void> {
     this.device.setAppType(ctx.appType)
@@ -40,6 +48,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
   }
 
   async onStop(ctx: ChannelContext<GenericChannelState>): Promise<void> {
+    this.shift?.cancelPending()
     this.device.clearChatBaseline()
     this.consecutiveUnreadFailures = 0
     this.deferredThink = null
@@ -94,7 +103,13 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
           summary: '截取当前聊天窗口',
           screenshotBase64: screenshot
         })
-        void this.forwardProviderEvents(screenshot, ctx)
+        if (!this.shift) {
+          await this.forwardProviderEvents(screenshot, ctx)
+          break
+        }
+        const action = await this.shift.prepare(ctx.appType)
+        if (!ctx.host.isRunning()) break
+        await this.handleTurn(action, screenshot, ctx)
         break
       }
 
@@ -137,16 +152,21 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
         ctx.host.enqueue({ type: 'check_unread' })
         break
 
-      case 'provider.error':
-        ctx.host.log('error', `回复服务异常：${event.error}`)
+      case 'provider.error': {
+        const text = this.shift?.sanitizeError(event.error) ?? event.error
+        ctx.host.log('error', `回复服务异常：${text}`)
         {
           const claimedByThink = this.traceDeferredThink(ctx)
           ctx.host.trace({
             phase: 'think',
             summary: '回复服务异常',
-            outcome: { status: 'fail', detail: event.error },
+            outcome: { status: 'fail', detail: text },
             claimPendingUsage: !claimedByThink
           })
+        }
+        if (text === '额度用尽' || text === '请先激活许可证') {
+          await ctx.host.stopSession('quota')
+          return
         }
         ctx.host.enqueue({
           type: 'wait_retry',
@@ -154,6 +174,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
           delayMs: this.retryDelayMs
         })
         break
+      }
 
       case 'check_unread': {
         const diffResult = await this.device.hasChatAreaChanged()
@@ -223,6 +244,230 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
         )
         break
     }
+  }
+
+  private async handleTurn(
+    action: TurnAction,
+    screenshot: string,
+    ctx: ChannelContext<GenericChannelState>
+  ): Promise<void> {
+    const plan = planObserve(action)
+    if (plan.kind === 'legacy') {
+      await this.forwardProviderEvents(screenshot, ctx)
+      return
+    }
+    if (plan.kind === 'advance') {
+      ctx.host.log(plan.logType, plan.message)
+      ctx.host.trace({
+        phase: 'think',
+        summary: plan.message,
+        outcome: { status: plan.logType === 'skip' ? 'skip' : 'ok' }
+      })
+      if (action.type === 'skip' && action.retry) {
+        if (action.reason === '额度用尽' || action.reason === '请先激活许可证') {
+          await ctx.host.stopSession('quota')
+          return
+        }
+        ctx.host.enqueue({
+          type: 'wait_retry',
+          reason: 'vision_error',
+          delayMs: this.retryDelayMs
+        })
+        return
+      }
+      await this.advance(ctx)
+      return
+    }
+    if (plan.kind === 'sendFixed' && action.type === 'fixed') {
+      const body = action.text.trim()
+      const answer = await this.shift!.confirmDraft({
+        key: action.key,
+        title: action.title,
+        text: body || (action.imagePath ? '［图片］' : ''),
+        knowledgeTitles: [],
+        imagePath: action.imagePath
+      })
+      if (!ctx.host.isRunning()) return
+      await this.finishConfirmed(planConfirm(answer), ctx, {
+        key: action.key,
+        title: action.title,
+        kind: action.kind,
+        imagePath: action.imagePath,
+        originalText: body
+      }, (sent) => {
+        ctx.host.log('reply', sent || '已发送图片')
+        ctx.host.trace({
+          phase: 'act',
+          summary: '发送指定素材',
+          action: { kind: 'send', payload: sent || action.imagePath },
+          outcome: { status: 'ok' }
+        })
+      })
+      return
+    }
+    if (plan.kind === 'generate' && action.type === 'reply') {
+      await this.generateAndConfirm(action, screenshot, ctx)
+    }
+  }
+
+  private async generateAndConfirm(
+    action: Extract<TurnAction, { type: 'reply' }>,
+    screenshot: string,
+    ctx: ChannelContext<GenericChannelState>
+  ): Promise<void> {
+    const text = await this.collectReply(action, screenshot, ctx)
+    if (!ctx.host.isRunning()) return
+    if (text == null) {
+      if (!this.replyFailed) {
+        ctx.host.log('skip', '本轮无需回复')
+        this.traceDeferredThink(ctx)
+        await this.advance(ctx)
+      }
+      return
+    }
+
+    const answer = await this.shift!.confirmDraft({
+      key: action.key,
+      title: action.title,
+      text,
+      knowledgeTitles: action.knowledgeTitles
+    })
+    if (!ctx.host.isRunning()) return
+    await this.finishConfirmed(planConfirm(answer), ctx, {
+      key: action.key,
+      title: action.title,
+      kind: action.kind,
+      imagePath: '',
+      originalText: text
+    }, (sent) => {
+      ctx.host.log('reply', sent)
+      const claimedByThink = this.traceDeferredThink(ctx)
+      ctx.host.trace({
+        phase: 'act',
+        summary: '发送回复',
+        action: { kind: 'send', payload: sent },
+        outcome: { status: 'ok' },
+        claimPendingUsage: !claimedByThink
+      })
+    })
+  }
+
+  private async finishConfirmed(
+    plan: ReturnType<typeof planConfirm>,
+    ctx: ChannelContext<GenericChannelState>,
+    target: {
+      key: string
+      title: string
+      kind: ConversationKind
+      imagePath: string
+      originalText: string
+    },
+    onSent: (text: string) => void
+  ): Promise<void> {
+    if (plan.kind === 'send') {
+      const text = plan.text === '［图片］' && !target.originalText ? '' : plan.text
+      const ok = await this.sendComposed(text, target.imagePath, target.key, target.title, ctx)
+      if (!ok || !ctx.host.isRunning()) return
+      this.shift?.recordSent(target.key, target.title, target.kind, text || '［图片］')
+      onSent(text)
+      await this.advance(ctx)
+      return
+    }
+
+    if (plan.handoff) {
+      await this.shift?.handOff(target.key, target.title, target.kind, '人在确认层转人工')
+    }
+    if (plan.bad) {
+      this.shift?.noteBad(target.key, target.title, target.kind, target.originalText, plan.bad)
+    }
+    if (plan.idle) {
+      this.shift?.noteIdle(target.key, target.title, plan.message)
+    }
+    ctx.host.log(plan.logType, plan.message)
+    await this.advance(ctx)
+  }
+
+  private async collectReply(
+    action: Extract<TurnAction, { type: 'reply' }>,
+    screenshot: string,
+    ctx: ChannelContext<GenericChannelState>
+  ): Promise<string | null> {
+    this.replyFailed = false
+    let text: string | null = null
+    try {
+      for await (const event of ctx.host.runProvider({
+        screenshot,
+        appType: ctx.appType,
+        currentContact: action.title,
+        historyText: action.historyText,
+        knowledgeText: action.knowledgeText
+      })) {
+        if (!ctx.host.isRunning()) return null
+        if (event.type === 'thinking') {
+          ctx.host.log('thinking', event.content)
+          this.deferredThink = event.content
+        } else if (event.type === 'reply_text') {
+          text = event.content
+        } else if (event.type === 'skip') {
+          text = null
+        } else if (event.type === 'error') {
+          this.replyFailed = true
+          ctx.host.enqueue({ type: 'provider.error', error: event.error })
+          return null
+        }
+      }
+    } catch (error: unknown) {
+      this.replyFailed = true
+      const message = error instanceof Error ? error.message : String(error)
+      ctx.host.enqueue({ type: 'provider.error', error: message })
+      return null
+    }
+    return text
+  }
+
+  private async sendComposed(
+    text: string,
+    imagePath: string,
+    key: string,
+    title: string,
+    ctx: ChannelContext<GenericChannelState>
+  ): Promise<boolean> {
+    if (!text && !imagePath) return true
+    if (this.shift) {
+      const same = await this.shift.stillOn(key)
+      if (!ctx.host.isRunning()) return false
+      if (!same) {
+        ctx.host.log('thinking', '窗口已经换了人，这条先不发')
+        ctx.host.enqueue({ type: 'observe_chat' })
+        return false
+      }
+    }
+    if (this.shift?.inputBackend() === 'usb') {
+      ctx.host.log('thinking', 'USB 键鼠未连接，这一条仍用软件键鼠')
+    }
+    const policy = this.shift?.pacing()
+    const alive = (): boolean => ctx.host.isRunning()
+    try {
+      if (imagePath) {
+        if (!this.device.sendImage) throw new Error('当前方式发不了图片')
+        await this.device.sendImage(imagePath, policy, alive)
+      }
+      if (text) await this.device.sendMessage(text, policy, alive)
+      return true
+    } catch (error: unknown) {
+      if (!ctx.host.isRunning() || (error instanceof Error && error.name === 'SendAborted')) return false
+      const message = error instanceof Error ? error.message : String(error)
+      ctx.host.log('error', `发送没有完成：${message}`)
+      this.shift?.noteIdle(key, title, '发送没有完成')
+      await this.advance(ctx)
+      return false
+    }
+  }
+
+  private async advance(ctx: ChannelContext<GenericChannelState>): Promise<void> {
+    await this.device.setChatBaseline()
+    ctx.state.latestChatBaseline = Date.now()
+    ctx.host.enqueue({ type: 'check_unread' })
   }
 
   private async forwardProviderEvents(

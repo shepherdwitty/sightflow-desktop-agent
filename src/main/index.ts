@@ -49,6 +49,9 @@ import {
 import { TraceStepInput } from '../core/trace/trace-types'
 import { ExperienceStore, NewExperienceCard } from '../core/memory/experience-store'
 import { induceCardsFromSession } from '../core/memory/learn-from-session'
+import { activateLicense } from '../core/gateway/capability'
+import { applyAgentPrompt, DutyService, type DutySettingsView } from './duty-service'
+import { isCommercialBuild, scrubCommercialLog } from './commercial'
 const StoreClass = typeof Store === 'function' ? Store : ((Store as any).default as typeof Store)
 
 const FIXED_ARK_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3'
@@ -73,6 +76,11 @@ interface AppSettings {
   defaultCaptureStrategy: CaptureStrategy
   // 每个 appType 独立保存的策略 + 框选区域
   capture: Partial<Record<AppType, PerAppCapture>>
+  licenseCode: string
+  gatewayUrl: string
+  /** 用户核对过当前窗口名称之后，才允许自动发送。默认关闭。 */
+  allowAuto: boolean
+  inputBackend: 'software' | 'usb'
 }
 
 type ProviderConfigFieldType = 'text' | 'password' | 'url' | 'select' | 'textarea'
@@ -138,12 +146,17 @@ const settingsStore = new StoreClass({
       config: {}
     },
     defaultCaptureStrategy: 'auto',
-    capture: {}
+    capture: {},
+    licenseCode: '',
+    gatewayUrl: '',
+    allowAuto: false,
+    inputBackend: 'software'
   }
 })
 
 let runtime: RuntimeHost<ReturnType<typeof createInitialGenericChannelState>> | null = null
 let runtimeDevice: DesktopDevice | null = null
+let dutyService: DutyService | null = null
 let settingsWindow: BrowserWindow | null = null
 let memoryWindow: BrowserWindow | null = null
 
@@ -160,6 +173,36 @@ function getTraceRecorder(): TraceRecorder {
     traceRecorderInstance = new TraceRecorder(worktraceBaseDir())
   }
   return traceRecorderInstance
+}
+
+function dutySettingsView(): DutySettingsView {
+  const settings = normalizeSettings(settingsStore.store)
+  const replyApiKey = settings.chatProvider.config?.apiKey
+  const systemPrompt = settings.chatProvider.config?.systemPrompt
+  return {
+    licenseCode: settings.licenseCode,
+    gatewayUrl: settings.gatewayUrl,
+    allowAuto: settings.allowAuto,
+    inputBackend: settings.inputBackend,
+    appType: settings.appType,
+    visionApiKey: settings.vision.apiKey,
+    replyApiKey: typeof replyApiKey === 'string' ? replyApiKey : '',
+    systemPrompt: typeof systemPrompt === 'string' ? systemPrompt : ''
+  }
+}
+
+function getDuty(): DutyService {
+  if (!dutyService) {
+    dutyService = new DutyService(join(worktraceBaseDir(), 'shift.sqlite'), {
+      getSettings: () => dutySettingsView(),
+      patchSettings: (partial) => {
+        const current = normalizeSettings(settingsStore.store)
+        settingsStore.set({ ...current, ...partial } as any)
+      },
+      experience: () => getExperienceStore()
+    })
+  }
+  return dutyService
 }
 
 function getExperienceStore(): ExperienceStore {
@@ -437,6 +480,7 @@ async function fetchProviderHub(url = DEFAULT_PROVIDER_HUB_URL): Promise<Provide
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(async () => {
+  getDuty().register(ipcMain)
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
 
@@ -706,7 +750,8 @@ app.whenReady().then(async () => {
     const settings = normalizeSettings(config || settingsStore.store)
     if (runtimeDevice) {
       // setApiKey 在 BoxSelectDevice 上是 no-op，对 RPADevice 才生效。
-      runtimeDevice.setApiKey(settings.vision.apiKey)
+      const creds = upstreamCredentials(settings)
+      runtimeDevice.setApiKey(creds.visionKey, creds.baseURL)
       runtimeDevice.setAppType(settings.appType)
     }
     if (runtime) {
@@ -840,32 +885,51 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
     const settings = normalizeSettings(rawConfig || settingsStore.store)
     const appType: AppType = settings.appType || 'wechat'
     const startupStrategy = resolveSettingsStrategy(appType, settings)
-    // 豆包（内置或经 hub 安装）聊天密钥已解耦：非空 config.apiKey 优先，空白回退视觉密钥
+    const commercial = isCommercialBuild()
+    if (commercial && !activateLicense(settings.licenseCode).ok) {
+      return { ok: false, reason: 'license', message: '请先激活许可证' }
+    }
+    // 豆包（内置或经 hub 安装）聊天密钥已解耦：非空 config.apiKey 优先，空白回退视觉密钥。
+    // 填了网关时，许可证作为上游钥匙，界面不展示模型名。
     const isDoubaoPath =
       !settings.chatProvider.installed ||
       settings.chatProvider.installed.id === BUILTIN_DOUBAO_PROVIDER_ID
-    const visionKey = settings.vision.apiKey.trim()
-    const chatKey = resolveChatKey(settings.chatProvider.config?.apiKey, visionKey)
+    const creds = upstreamCredentials(settings)
+    const chatKey = creds.key
+    const visionKey = creds.visionKey
 
     if (isDoubaoPath && !chatKey) {
       return {
         ok: false,
-        reason: 'no_chat_key',
-        message: '请填写智能体 API Key，或在基础配置中填写视觉密钥'
+        reason: commercial ? 'unavailable' : 'no_chat_key',
+        message: commercial ? '服务暂不可用' : '请填写智能体 API Key，或在基础配置中填写视觉密钥'
       }
     }
     // 视觉密钥仅在 VLM 抓取策略下必需
     if (startupStrategy === 'vlm' && !visionKey) {
-      return { ok: false, reason: 'no_vision_key', message: '请先填写视觉接口密钥' }
+      return {
+        ok: false,
+        reason: commercial ? 'unavailable' : 'no_vision_key',
+        message: commercial ? '服务暂不可用' : '请先填写视觉接口密钥'
+      }
     }
 
     // 没有自定义 provider → 走内置 doubao
     let provider
+    const duty = getDuty()
+    duty.setVisionClient(
+      visionKey
+        ? new AIClient({
+            apiKey: visionKey,
+            baseURL: creds.baseURL,
+            model: settings.chatProvider.config?.model || DEFAULT_MODEL
+          })
+        : null
+    )
     if (!settings.chatProvider.installed) {
-      const loaded = await loadBuiltinDoubaoProvider({
-        ...settings.chatProvider.config,
-        apiKey: chatKey
-      })
+      const loaded = await loadBuiltinDoubaoProvider(
+        withDutyUpstream({ ...settings.chatProvider.config, apiKey: chatKey }, settings)
+      )
       provider = loaded.provider
     } else {
       const installedManifest = await getInstalledProviderManifest(settings.chatProvider.installed)
@@ -882,16 +946,17 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
         return {
           ok: false,
           reason: 'missing_required_field',
-          message: `缺少必填配置: ${missing}`
+          message: commercial ? '服务暂不可用' : `缺少必填配置: ${missing}`
         }
       }
 
-      const effectiveConfig = isDoubaoPath
+      const baseConfig = isDoubaoPath
         ? { ...settings.chatProvider.config, apiKey: chatKey }
         : omitApiKeyIfSchemaOmitsIt(
             settings.chatProvider.config,
             installedManifest?.configSchema?.properties
           )
+      const effectiveConfig = withDutyUpstream(baseConfig, settings)
 
       const loaded = await loadInstalledProvider(settings.chatProvider.installed, effectiveConfig)
       provider = loaded.provider
@@ -900,14 +965,14 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
     const mainWindow = BrowserWindow.getAllWindows().find((w) => !w.isDestroyed()) ?? null
     const log = (type: 'thinking' | 'reply' | 'skip' | 'error', content: string): void => {
       if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send('engine:log', { type, content })
+        mainWindow.webContents.send('engine:log', { type, content: scrubCommercialLog(content) })
       }
     }
 
     let device: DesktopDevice
     let strategy: CaptureStrategy
     try {
-      const built = await buildDevice(appType, settings, visionKey, log)
+      const built = await buildDevice(appType, settings, visionKey, creds.baseURL, log)
       device = built.device
       strategy = built.strategy
     } catch (err: any) {
@@ -947,7 +1012,7 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
       }
     }
 
-    const channel = new GenericChannelSession(device)
+    const channel = new GenericChannelSession(device, duty)
     runtime = new RuntimeHost({
       appType,
       channel,
@@ -980,6 +1045,7 @@ async function stopEngineCore(stopReason: string): Promise<SkillPauseResult> {
     return { ok: false, reason: 'not_running', message: '引擎未运行' }
   }
   try {
+    // 草稿要等 running 先变成 false，再由会话 onStop 取消。提前取消会在引擎仍在跑时把草稿当成丢弃。
     await runtime.stopSession(stopReason)
     notifyEngineStateChanged('idle')
     return { ok: true }
@@ -1041,6 +1107,7 @@ async function buildDevice(
   appType: AppType,
   settings: AppSettings,
   apiKey: string,
+  baseURL: string,
   log: (type: 'thinking' | 'reply' | 'skip' | 'error', content: string) => void
 ): Promise<{ device: DesktopDevice; strategy: CaptureStrategy }> {
   const perApp = settings.capture[appType] ?? { strategy: 'auto' as CaptureStrategy, regions: null }
@@ -1049,7 +1116,7 @@ async function buildDevice(
   if (effective === 'vlm') {
     const rpa = new RPADevice()
     rpa.setAppType(appType)
-    rpa.setApiKey(apiKey)
+    rpa.setApiKey(apiKey, baseURL)
     return { device: rpa, strategy: 'vlm' }
   }
 
@@ -1190,7 +1257,32 @@ function normalizeSettings(raw: any): AppSettings {
       config: rawProviderConfig
     },
     defaultCaptureStrategy: coerceStrategy(raw?.defaultCaptureStrategy, 'auto'),
-    capture: normalizeCapture(raw?.capture)
+    capture: normalizeCapture(raw?.capture),
+    licenseCode: typeof raw?.licenseCode === 'string' ? raw.licenseCode.trim() : '',
+    gatewayUrl: typeof raw?.gatewayUrl === 'string' ? raw.gatewayUrl.trim() : '',
+    allowAuto: raw?.allowAuto === true,
+    inputBackend: raw?.inputBackend === 'usb' ? 'usb' : 'software'
+  }
+}
+
+function upstreamCredentials(settings: AppSettings): { key: string; visionKey: string; baseURL: string } {
+  const gateway = settings.gatewayUrl.trim()
+  const license = settings.licenseCode.trim()
+  const visionKey = settings.vision.apiKey.trim()
+  const chatKey = resolveChatKey(settings.chatProvider.config?.apiKey, visionKey)
+  if (!gateway) return { key: chatKey, visionKey, baseURL: FIXED_ARK_BASE_URL }
+  const key = license || chatKey
+  return { key, visionKey: license || visionKey, baseURL: gateway }
+}
+
+function withDutyUpstream(config: Record<string, any>, settings: AppSettings): Record<string, any> {
+  const prompted = applyAgentPrompt(config, getDuty().activeAgent())
+  const gateway = settings.gatewayUrl.trim()
+  if (!gateway) return prompted
+  return {
+    ...prompted,
+    baseURL: gateway,
+    apiKey: settings.licenseCode.trim() || prompted.apiKey
   }
 }
 

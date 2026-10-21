@@ -9,7 +9,8 @@ import { AIClient } from './ai-client'
 import { AppType } from './rpa/types'
 import { BBox } from './rpa/vision-utils'
 import { captureChatMainArea } from './rpa/screenshot-utils'
-import { sendReplyAction, activeUnreadByClickAction, clickUnreadContactAction } from './rpa/input-utils'
+import { sendReplyAction, sendImageByCoordsAction, sendFailure, activeUnreadByClickAction, clickUnreadContactAction } from './rpa/input-utils'
+import type { PacingPolicy } from './shift/pacing'
 import {
   hasUnreadMessage as hasUnreadMessageDetect,
   isChatContactUnread as isChatContactUnreadDetect
@@ -37,9 +38,9 @@ export class RPADevice implements DesktopDevice {
     this.appType = appType
   }
 
-  setApiKey(apiKey: string): void {
+  setApiKey(apiKey: string, baseURL?: string): void {
     if (!apiKey) return
-    this.aiClient = new AIClient({ apiKey })
+    this.aiClient = new AIClient({ apiKey, baseURL })
   }
 
   // ── 生命周期 ──
@@ -228,11 +229,17 @@ export class RPADevice implements DesktopDevice {
 
   // ── 动作层 ──
 
-  async sendMessage(text: string): Promise<void> {
-    const success = await sendReplyAction(this.appType, text)
-    if (!success) {
-      throw new Error('发送消息失败')
-    }
+  async sendMessage(text: string, pacing?: PacingPolicy, alive?: () => boolean): Promise<void> {
+    const success = await sendReplyAction(this.appType, text, pacing, alive)
+    if (!success) throw sendFailure(alive)
+  }
+
+  async sendImage(filePath: string, pacing?: PacingPolicy, alive?: () => boolean): Promise<void> {
+    const inputArea = getInputAreaFromCache(this.appType)
+    if (!inputArea) throw new Error('尚未测量输入框区域')
+    const [x, y] = inputArea.coordinates
+    const ok = await sendImageByCoordsAction(x, y, filePath, pacing, alive)
+    if (!ok) throw sendFailure(alive, '发送图片失败')
   }
 
   /**

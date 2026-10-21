@@ -22,6 +22,8 @@ export type SkillStartReason =
   | 'engine_failed'
   | 'already_running'
   | 'wizard_cancelled'
+  | 'license'
+  | 'unavailable'
 
 export type SkillPauseReason = 'not_running' | 'pause_failed'
 
@@ -90,7 +92,9 @@ const START_STATUS_MAP: Record<SkillStartReason, number> = {
   no_provider: 400,
   missing_required_field: 400,
   engine_failed: 500,
-  wizard_cancelled: 409
+  wizard_cancelled: 409,
+  license: 402,
+  unavailable: 503
 }
 
 const PAUSE_STATUS_MAP: Record<SkillPauseReason, number> = {

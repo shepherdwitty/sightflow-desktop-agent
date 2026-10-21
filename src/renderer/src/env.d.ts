@@ -3,4 +3,5 @@
 
 interface ImportMetaEnv {
   readonly RENDERER_VITE_SHOW_TOKEN_COST?: string
+  readonly RENDERER_VITE_COMMERCIAL?: string
 }

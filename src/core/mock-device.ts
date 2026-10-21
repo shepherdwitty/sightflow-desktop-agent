@@ -11,7 +11,7 @@ export class MockDevice implements DesktopDevice {
     // Mock 不依赖窗口类型
   }
 
-  setApiKey(_apiKey: string): void {
+  setApiKey(_apiKey: string, _baseURL?: string): void {
     // Mock: 不需要 API key
   }
 
@@ -65,7 +65,7 @@ export class MockDevice implements DesktopDevice {
     console.log('[MockDevice] 清除 chatMainArea baseline（模拟）')
   }
 
-  async sendMessage(text: string): Promise<void> {
+  async sendMessage(text: string, _pacing?: unknown, _alive?: () => boolean): Promise<void> {
     console.log(`[MockDevice] Sent: ${text}`)
   }
 

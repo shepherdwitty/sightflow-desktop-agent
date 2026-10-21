@@ -6,6 +6,10 @@ export interface ProviderInput {
   appType: AppType
   currentContact?: string
   ocrText?: string
+  /** 屏幕外的更早回合，纯文字。 */
+  historyText?: string
+  /** 本机知识包命中的段落。 */
+  knowledgeText?: string
   /** 运行时注入的经验卡片（工作记忆）。Provider 可拼入 system prompt。 */
   memoryCards?: MemoryCardBrief[]
 }

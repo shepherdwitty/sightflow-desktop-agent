@@ -2,8 +2,17 @@ import { resolve } from 'path'
 import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 
+const commercialOn =
+  process.env.SIGHTFLOW_COMMERCIAL === '1' || process.env.RENDERER_VITE_COMMERCIAL === 'true'
+
 export default defineConfig({
   main: {
+    // 商业开关在打包时写死。安装包启动时通常没有这两个环境变量，
+    // 如果仍在运行时读取，商业包会退回开源界面。
+    define: {
+      'process.env.SIGHTFLOW_COMMERCIAL': JSON.stringify(commercialOn ? '1' : '0'),
+      'process.env.RENDERER_VITE_COMMERCIAL': JSON.stringify(commercialOn ? 'true' : 'false')
+    },
     build: {
       rollupOptions: {
         input: {
@@ -21,6 +30,9 @@ export default defineConfig({
       }
     },
     plugins: [react()],
+    define: {
+      'import.meta.env.RENDERER_VITE_COMMERCIAL': JSON.stringify(commercialOn ? 'true' : 'false')
+    },
     build: {
       rollupOptions: {
         input: {

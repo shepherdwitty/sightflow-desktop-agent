@@ -343,3 +343,30 @@ export async function captureChatMainArea(appType: AppType): Promise<Electron.Na
     return null
   }
 }
+
+/** 按布局缓存裁标题栏或聊天记录区，返回 data URL。没有这块区域时返回 null。 */
+export async function captureLayoutArea(
+  appType: AppType,
+  area: 'headerArea' | 'chatMainArea'
+): Promise<string | null> {
+  const { getLayoutCache, bboxToCropBounds } = await import('./vision-utils')
+  const item = getLayoutCache(appType)?.[area]
+  if (!item) return null
+
+  if (item.rect) {
+    const shot = await captureScreenRegion(item.rect)
+    return shot.success && shot.screenshotBase64 ? shot.screenshotBase64 : null
+  }
+  if (!item.bbox) return null
+
+  const windowInfo = await getWindowInfo(appType, false)
+  if (!windowInfo?.bounds) return null
+  const cropBounds = bboxToCropBounds(item.bbox, windowInfo.bounds)
+  const shot = await captureWechatWindow(appType, {
+    x: cropBounds.x,
+    y: cropBounds.y,
+    width: cropBounds.width,
+    height: cropBounds.height
+  })
+  return shot.success && shot.screenshotBase64 ? shot.screenshotBase64 : null
+}

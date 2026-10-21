@@ -46,7 +46,10 @@ export function createProvider(context) {
           screenshot: input.screenshot,
           apiKey,
           model: providerConfig.model || DEFAULT_MODEL,
+          baseURL: providerConfig.baseURL || DEFAULT_BASE_URL,
           systemPrompt: (providerConfig.systemPrompt || DEFAULT_PROMPT) + memorySection,
+          historyText: input.historyText,
+          knowledgeText: input.knowledgeText,
           host: context && context.host
         })
 
@@ -67,7 +70,11 @@ export function createProvider(context) {
   }
 }
 
-async function requestReply({ screenshot, apiKey, model, systemPrompt, host }) {
+async function requestReply({ screenshot, apiKey, model, baseURL, systemPrompt, historyText, knowledgeText, host }) {
+  const extra = [knowledgeText, historyText].filter(Boolean).join('\n\n')
+  const instruction = extra
+    ? `请根据截图中的最新消息回复。资料和更早的对话如下。\n\n${extra}`
+    : '请根据截图中微信聊天窗口的最新消息进行回复。'
   const body = {
     model,
     messages: [
@@ -76,7 +83,7 @@ async function requestReply({ screenshot, apiKey, model, systemPrompt, host }) {
         role: 'user',
         content: [
           { type: 'image_url', image_url: { url: normalizeImageUrl(screenshot) } },
-          { type: 'text', text: '请根据截图中微信聊天窗口的最新消息进行回复。' }
+          { type: 'text', text: instruction }
         ]
       }
     ],
@@ -84,7 +91,7 @@ async function requestReply({ screenshot, apiKey, model, systemPrompt, host }) {
     stream: false
   }
 
-  const response = await fetch(`${DEFAULT_BASE_URL}/chat/completions`, {
+  const response = await fetch(`${baseURL || DEFAULT_BASE_URL}/chat/completions`, {
     method: 'POST',
     headers: {
       Authorization: `Bearer ${apiKey}`,

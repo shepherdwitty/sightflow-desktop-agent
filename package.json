@@ -17,7 +17,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json --composite false",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json --composite false",
     "typecheck": "npm run typecheck:node && npm run typecheck:web && tsc --noEmit -p tsconfig.tests.json",
-    "test": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/main/api-key-policy.test.ts src/core/usage/usage-ledger.test.ts",
+    "test": "node --experimental-strip-types --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --import ./scripts/register-test.mjs --test src/main/api-key-policy.test.ts src/main/commercial.test.ts src/core/usage/usage-ledger.test.ts src/core/memory/*.test.ts src/core/shift/*.test.ts src/core/knowledge/*.test.ts src/core/gateway/*.test.ts",
     "start": "electron-vite preview",
     "dev": "node scripts/dev-launch.mjs",
     "dev:test-screenshot": "electron-vite build && cross-env TEST_MODE=screenshot electron ./out/main/test-cli.js",
@@ -43,7 +43,8 @@
     "jimp": "^1.6.1",
     "node-window-manager": "^2.2.4",
     "pixelmatch": "^7.1.0",
-    "pngjs": "^7.0.0"
+    "pngjs": "^7.0.0",
+    "unpdf": "^1.9.1"
   },
   "devDependencies": {
     "@electron-toolkit/eslint-config-prettier": "^3.0.0",

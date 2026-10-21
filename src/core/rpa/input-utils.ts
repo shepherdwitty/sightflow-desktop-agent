@@ -1,4 +1,5 @@
-import { clipboard } from 'electron'
+import { clipboard, nativeImage } from 'electron'
+import { PacingPolicy, buildTypeScript } from '../shift/pacing'
 import { AppType } from './types'
 import { getWindowInfo } from './window-utils'
 import { getInputAreaFromCache } from './vision-utils'
@@ -124,10 +125,21 @@ const getWeChatInputPosition = (bounds: any, scaleFactor: number) => {
  * 3. 剪贴板 + Cmd/Ctrl+V 粘贴
  * 4. Enter 发送
  */
+export function sendFailure(alive?: () => boolean, message = '发送消息失败'): Error {
+  if (alive && !alive()) {
+    const error = new Error('发送已取消')
+    error.name = 'SendAborted'
+    return error
+  }
+  return new Error(message)
+}
+
 export async function sendReplyByCoordsAction(
   x: number,
   y: number,
-  text: string
+  text: string,
+  policy?: PacingPolicy,
+  alive?: () => boolean
 ): Promise<boolean> {
   const robot = getRobot()
   if (!robot) {
@@ -135,42 +147,153 @@ export async function sendReplyByCoordsAction(
     return false
   }
 
+  const saved = snapshotClipboard()
+  let focused = false
+  let dirty = false
   try {
-    await humanLikeMove(x, y)
-    await randomDelayIn(100, 200)
-
-    robot.mouseClick('left')
-    await randomDelayIn(200, 300)
-
-    clipboard.writeText(text)
-    await randomDelayIn(50, 100)
-
-    if (IS_MAC) {
-      robot.keyTap('v', ['command'])
-    } else {
-      robot.keyTap('v', ['control'])
+    if (stopped(alive)) return false
+    await focusInput(x, y)
+    focused = true
+    if (stopped(alive)) return false
+    if (!policy?.enabled) {
+      await pasteText(text)
+      dirty = true
+      if (stopped(alive)) return false
+      await commitInput()
+      dirty = false
+      return true
     }
 
-    await randomDelayIn(300, 500)
-
-    robot.keyTap('enter')
-
-    if (IS_WINDOWS) {
-      robot.keyTap('enter', ['control'])
-      await randomDelayIn(40, 60)
-      robot.keyTap('backspace')
-    } else {
-      robot.keyTap('enter', ['command'])
-      await randomDelayIn(20, 40)
-      robot.keyToggle('command', 'up')
-      await randomDelayIn(20, 40)
-      robot.keyTap('backspace')
+    for (const action of buildTypeScript(text, policy)) {
+      if (stopped(alive)) return false
+      if (action.op === 'wait') await delay(action.ms)
+      else if (action.op === 'paste') {
+        await pasteText(action.text)
+        dirty = true
+      } else if (action.op === 'backspace') {
+        for (let i = 0; i < action.count; i += 1) robot.keyTap('backspace')
+      } else if (action.op === 'enter') {
+        await commitInput()
+        dirty = false
+      }
     }
-
     return true
   } catch (err: any) {
     console.error('[sendReplyByCoordsAction] Failed:', err)
     return false
+  } finally {
+    if (focused && dirty) await clearFocusedDraft()
+    restoreClipboard(saved)
+  }
+}
+
+function stopped(alive?: () => boolean): boolean {
+  return Boolean(alive && !alive())
+}
+
+function snapshotClipboard(): { text: string; image: ReturnType<typeof clipboard.readImage> } | null {
+  try {
+    return { text: clipboard.readText(), image: clipboard.readImage() }
+  } catch {
+    return null
+  }
+}
+
+function restoreClipboard(saved: { text: string; image: ReturnType<typeof clipboard.readImage> } | null): void {
+  if (!saved) return
+  try {
+    if (!saved.image.isEmpty()) clipboard.writeImage(saved.image)
+    else clipboard.writeText(saved.text)
+  } catch {
+    // 还原失败时，已经发出的内容不受影响。
+  }
+}
+
+async function focusInput(x: number, y: number): Promise<void> {
+  const robot = getRobot()
+  if (!robot) return
+  await humanLikeMove(x, y)
+  await randomDelayIn(100, 200)
+  robot.mouseClick('left')
+  await randomDelayIn(200, 300)
+}
+
+async function pasteText(text: string): Promise<void> {
+  const robot = getRobot()
+  if (!robot) return
+  clipboard.writeText(text)
+  await randomDelayIn(50, 100)
+  if (IS_MAC) robot.keyTap('v', ['command'])
+  else robot.keyTap('v', ['control'])
+  await randomDelayIn(80, 160)
+}
+
+async function commitInput(): Promise<void> {
+  const robot = getRobot()
+  if (!robot) return
+  await randomDelayIn(120, 220)
+  robot.keyTap('enter')
+  if (IS_WINDOWS) {
+    robot.keyTap('enter', ['control'])
+    await randomDelayIn(40, 60)
+    robot.keyTap('backspace')
+  } else {
+    robot.keyTap('enter', ['command'])
+    await randomDelayIn(20, 40)
+    robot.keyToggle('command', 'up')
+    await randomDelayIn(20, 40)
+    robot.keyTap('backspace')
+  }
+}
+
+export async function sendImageByCoordsAction(
+  x: number,
+  y: number,
+  filePath: string,
+  policy?: PacingPolicy,
+  alive?: () => boolean
+): Promise<boolean> {
+  const robot = getRobot()
+  if (!robot) return false
+  const image = nativeImage.createFromPath(filePath)
+  if (image.isEmpty()) return false
+  const saved = snapshotClipboard()
+  let focused = false
+  let dirty = false
+  try {
+    if (stopped(alive)) return false
+    await focusInput(x, y)
+    focused = true
+    if (policy?.enabled && policy.readBeforeType) await delay(policy.speed === 'slow' ? 1400 : 800)
+    if (stopped(alive)) return false
+    clipboard.writeImage(image)
+    await randomDelayIn(80, 140)
+    if (IS_MAC) robot.keyTap('v', ['command'])
+    else robot.keyTap('v', ['control'])
+    dirty = true
+    if (stopped(alive)) return false
+    await commitInput()
+    dirty = false
+    return true
+  } catch (error) {
+    console.error('[sendImageByCoordsAction] Failed:', error)
+    return false
+  } finally {
+    if (focused && dirty) await clearFocusedDraft()
+    restoreClipboard(saved)
+  }
+}
+
+async function clearFocusedDraft(): Promise<void> {
+  const robot = getRobot()
+  if (!robot) return
+  try {
+    if (IS_MAC) robot.keyTap('a', ['command'])
+    else robot.keyTap('a', ['control'])
+    await randomDelayIn(20, 40)
+    robot.keyTap('backspace')
+  } catch {
+    // 输入框里剩下的半句，下一轮粘贴会接在后面。
   }
 }
 
@@ -178,7 +301,12 @@ export async function sendReplyByCoordsAction(
  * 业务原子 2：极简防检测回复模式（VLM 路线适配器）。
  * 从 layout cache 中找输入框坐标，缺失时回退到经验公式，最终调用 `sendReplyByCoordsAction`。
  */
-export async function sendReplyAction(appType: AppType, text: string): Promise<boolean> {
+export async function sendReplyAction(
+  appType: AppType,
+  text: string,
+  policy?: PacingPolicy,
+  alive?: () => boolean
+): Promise<boolean> {
   const windowInfo = await getWindowInfo(appType, false)
   if (!windowInfo || !windowInfo.bounds) {
     console.error('[sendReplyAction] 无法获取窗口信息')
@@ -204,7 +332,7 @@ export async function sendReplyAction(appType: AppType, text: string): Promise<b
     inputY = pos.inputY
   }
 
-  return sendReplyByCoordsAction(inputX, inputY, text)
+  return sendReplyByCoordsAction(inputX, inputY, text, policy, alive)
 }
 
 export type ClickPolicy = 'single' | 'double'
