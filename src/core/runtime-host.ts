@@ -7,7 +7,9 @@ import {
   RuntimeHostControls,
   SessionEvent
 } from './session-types'
+import { prefixUsbAction, UsbInputError } from './rpa/ch9329'
 import { AppType } from './rpa/types'
+import { markUsbTraceStep } from './trace/trace-mark'
 import { MemoryCardBrief, TraceStepInput } from './trace/trace-types'
 
 interface RuntimeHostOptions<TState> {
@@ -16,6 +18,8 @@ interface RuntimeHostOptions<TState> {
   provider: ProviderAdapter
   initialState: TState
   onLog?: (type: 'thinking' | 'reply' | 'skip' | 'error', content: string) => void
+  /** 当前输入是否走 USB 助理。只给鼠标和已发出的回复打标记。 */
+  usbActive?: () => boolean
   /** work-trace 落点：channel 通过 host.trace() 提交的每条轨迹都会回调到这里 */
   onTrace?: (step: TraceStepInput) => void
   /** 每轮 provider 调用前取当前启用的经验卡片，注入 ProviderInput */
@@ -51,8 +55,8 @@ export class RuntimeHost<TState> {
 
     try {
       await this.options.channel.onStart(this.context)
-    } catch (error: any) {
-      this.log('error', error?.message || String(error))
+    } catch (error: unknown) {
+      this.log('error', this.formatError(error))
       await this.stopSession('start_failed')
       throw error
     }
@@ -94,6 +98,8 @@ export class RuntimeHost<TState> {
       schedule: (event, delayMs) => this.schedule(event, delayMs),
       runProvider: (input: ProviderInput) => this.runProviderWithMemory(input),
       log: (type, content) => this.log(type, content),
+      logInput: (type, content) =>
+        this.log(type, prefixUsbAction(content, this.options.usbActive?.() === true)),
       trace: (step) => this.trace(step),
       isRunning: () => this.running,
       stopSession: async (reason?: string) => this.stopSession(reason)
@@ -126,7 +132,7 @@ export class RuntimeHost<TState> {
       : step
 
     try {
-      this.options.onTrace(enriched)
+      this.options.onTrace(markUsbTraceStep(enriched, this.options.usbActive?.() === true))
     } catch (error) {
       console.error('[RuntimeHost] onTrace 回调失败:', error)
     }
@@ -161,12 +167,23 @@ export class RuntimeHost<TState> {
 
         await this.options.channel.onEvent(event, this.context)
       }
-    } catch (error: any) {
-      this.log('error', error?.message || String(error))
+    } catch (error: unknown) {
+      this.log('error', this.formatError(error))
       await this.stopSession('runtime_error')
     } finally {
       this.processingQueue = false
     }
+  }
+
+  private formatError(error: unknown): string {
+    const message = error instanceof Error ? error.message : String(error)
+    if (
+      error instanceof UsbInputError ||
+      (error instanceof Error && error.name === 'UsbInputError')
+    ) {
+      return prefixUsbAction(message, true)
+    }
+    return message
   }
 
   private log(type: 'thinking' | 'reply' | 'skip' | 'error', content: string): void {

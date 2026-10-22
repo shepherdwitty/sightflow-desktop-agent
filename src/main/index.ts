@@ -21,6 +21,7 @@ import {
   createInitialGenericChannelState,
   GenericChannelSession
 } from '../core/generic-channel-session'
+import { closeUsbLink, currentInputMode, refreshUsbReady, syncInputBackend } from '../core/rpa/input-driver'
 import { AppType, BoxRegions, CaptureStrategy, isWechatLike } from '../core/rpa/types'
 import { runBoxSelectWizard, type WizardStepKey } from './overlay-window'
 import {
@@ -198,6 +199,7 @@ function getDuty(): DutyService {
       patchSettings: (partial) => {
         const current = normalizeSettings(settingsStore.store)
         settingsStore.set({ ...current, ...partial } as any)
+        if (partial.inputBackend) syncInputBackend(partial.inputBackend)
       },
       experience: () => getExperienceStore()
     })
@@ -480,6 +482,8 @@ async function fetchProviderHub(url = DEFAULT_PROVIDER_HUB_URL): Promise<Provide
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(async () => {
+  syncInputBackend(dutySettingsView().inputBackend)
+  void refreshUsbReady()
   getDuty().register(ipcMain)
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.electron')
@@ -871,6 +875,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', () => {
+  void closeUsbLink()
   stopSkillServer()
 })
 
@@ -1019,6 +1024,7 @@ async function startEngineCore(rawConfig?: any): Promise<SkillStartResult> {
       provider,
       initialState: createInitialGenericChannelState(),
       onLog: log,
+      usbActive: () => currentInputMode() === 'usb',
       onTrace,
       getMemoryCards: () => getExperienceStore().getActiveCardBriefs(),
       onSessionEnd: () => recorder.endSession()

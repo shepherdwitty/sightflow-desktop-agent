@@ -59,6 +59,12 @@ export interface TraceStep {
   outcome?: TraceOutcome
   /** 本步归属的模型算力消耗（token + 计费模拟），结构见 usage-ledger 的 StepUsage */
   usage?: StepUsage
+  /**
+   * 这一步的点击或发送由 USB 助理执行。
+   * 缺省表示走软件键鼠，或这条轨迹记下来时还没有这个字段。
+   * 只出现在 phase=act 且 action.kind 为 click / send 的步骤上。
+   */
+  inputDevice?: 'usb'
 }
 
 /**
@@ -83,6 +89,8 @@ export interface TraceStepInput {
    * 取走尚未归属的 reply pending。只给「模型调用已经返回」的那条轨迹设。
    */
   claimPendingUsage?: boolean
+  /** 由 RuntimeHost 在落盘前写入。业务层不用自己填。 */
+  inputDevice?: 'usb'
 }
 
 /** 注入给 Provider 的经验卡片摘要（完整卡片定义见 memory/experience-store.ts） */

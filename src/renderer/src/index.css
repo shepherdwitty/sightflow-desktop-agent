@@ -138,6 +138,85 @@ body {
   opacity: 0.6;
 }
 
+.usb-status {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 240px;
+  max-width: min(440px, 100%);
+  padding: 8px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--glass-border);
+  background: var(--bg-glass-heavy);
+  -webkit-app-region: no-drag;
+}
+
+.usb-status.checking {
+  border-color: var(--glass-border);
+}
+
+.usb-status.absent {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.usb-status.absent.held {
+  border-color: rgba(248, 113, 113, 0.45);
+  background: var(--error-bg);
+}
+
+.usb-status.plugged {
+  border-color: rgba(251, 191, 36, 0.45);
+  background: rgba(251, 191, 36, 0.1);
+}
+
+.usb-status.active {
+  border-color: rgba(16, 185, 129, 0.5);
+  background: var(--success-bg);
+  box-shadow: 0 0 18px rgba(16, 185, 129, 0.12);
+}
+
+.usb-status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  background: var(--text-muted);
+}
+
+.usb-status.absent .usb-status-dot { background: var(--text-muted); }
+.usb-status.absent.held .usb-status-dot { background: var(--error); }
+.usb-status.plugged .usb-status-dot { background: var(--warning); }
+.usb-status.active .usb-status-dot {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent-glow);
+}
+
+.usb-status-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.usb-status-title {
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1.2;
+  color: var(--text-primary);
+}
+
+.usb-status.absent.held .usb-status-title { color: var(--error); }
+.usb-status.plugged .usb-status-title { color: var(--warning); }
+.usb-status.active .usb-status-title { color: var(--accent-hover); }
+
+.usb-status-detail {
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--text-secondary);
+}
+
 /* ─── Content ─── */
 .app-content {
   flex: 1;
@@ -586,6 +665,33 @@ button:focus-visible {
 .log-type.reply { color: var(--accent); }
 .log-type.skip { color: var(--text-muted); }
 .log-type.error { color: var(--error); }
+
+.log-usb {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  margin-right: 5px;
+  vertical-align: -4px;
+  color: var(--accent-hover);
+}
+
+.trace-usb-mark {
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+}
+
+.trace-usb-mark .log-usb {
+  margin-right: 0;
+  vertical-align: 0;
+}
+
+.step-detail-value {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
 
 /* ─── Form Elements ─── */
 .form-group { margin-bottom: 14px; }

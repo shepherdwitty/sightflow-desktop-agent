@@ -39,6 +39,8 @@ export interface RuntimeHostControls {
   schedule(event: SessionEvent, delayMs: number): void
   runProvider(input: ProviderInput): AsyncIterable<ProviderEvent>
   log(type: 'thinking' | 'reply' | 'skip' | 'error', content: string): void
+  /** 鼠标动作或已经发出的文字回复。USB 助理启用时，日志前面会加标记。 */
+  logInput(type: 'thinking' | 'reply' | 'skip' | 'error', content: string): void
   /** 记录一条结构化工作轨迹（work-trace）。无 recorder 时为 no-op。 */
   trace(step: TraceStepInput): void
   isRunning(): boolean

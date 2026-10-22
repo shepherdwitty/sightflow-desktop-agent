@@ -122,7 +122,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
         const claimedByThink = this.traceDeferredThink(ctx)
         const sendStart = Date.now()
         await this.device.sendMessage(event.content)
-        ctx.host.log('reply', event.content)
+        ctx.host.logInput('reply', event.content)
         ctx.host.trace({
           phase: 'act',
           summary: '发送回复',
@@ -211,7 +211,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
           break
         }
 
-        ctx.host.log('thinking', '检测到未读消息，正在尝试打开会话')
+        ctx.host.logInput('thinking', '检测到未读消息，正在尝试打开会话')
         ctx.host.trace({
           phase: 'act',
           summary: '点击未读会话入口',
@@ -295,7 +295,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
         imagePath: action.imagePath,
         originalText: body
       }, (sent) => {
-        ctx.host.log('reply', sent || '已发送图片')
+        ctx.host.logInput('reply', sent || '已发送图片')
         ctx.host.trace({
           phase: 'act',
           summary: '发送指定素材',
@@ -340,7 +340,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
       imagePath: '',
       originalText: text
     }, (sent) => {
-      ctx.host.log('reply', sent)
+      ctx.host.logInput('reply', sent)
       const claimedByThink = this.traceDeferredThink(ctx)
       ctx.host.trace({
         phase: 'act',
@@ -442,9 +442,6 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
         return false
       }
     }
-    if (this.shift?.inputBackend() === 'usb') {
-      ctx.host.log('thinking', 'USB 键鼠未连接，这一条仍用软件键鼠')
-    }
     const policy = this.shift?.pacing()
     const alive = (): boolean => ctx.host.isRunning()
     try {
@@ -457,7 +454,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
     } catch (error: unknown) {
       if (!ctx.host.isRunning() || (error instanceof Error && error.name === 'SendAborted')) return false
       const message = error instanceof Error ? error.message : String(error)
-      ctx.host.log('error', `发送没有完成：${message}`)
+      ctx.host.logInput('error', `发送没有完成：${message}`)
       this.shift?.noteIdle(key, title, '发送没有完成')
       await this.advance(ctx)
       return false
@@ -534,7 +531,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
         return 'contact_not_ready'
       }
 
-      ctx.host.log('thinking', '仍检测到未读消息，正在再次尝试打开会话')
+      ctx.host.logInput('thinking', '仍检测到未读消息，正在再次尝试打开会话')
       await this.device.activeUnreadByClick(recheckCoords)
       await this.sleep(500)
       const contactAgain = await captureUsage(() => this.device.isChatContactUnread())
@@ -558,7 +555,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
         visionUsages.push(contactAfterReset.usage)
         contactResult = contactAfterReset.value
         if (!contactResult.isUnread) {
-          ctx.host.log('thinking', '重置后仍未成功，正在再次尝试打开会话')
+          ctx.host.logInput('thinking', '重置后仍未成功，正在再次尝试打开会话')
           const retryUnreadCaptured = await captureUsage(() => this.device.hasUnreadMessage())
           visionUsages.push(retryUnreadCaptured.usage)
           const retryUnread = retryUnreadCaptured.value
@@ -596,7 +593,7 @@ export class GenericChannelSession implements ChannelSession<GenericChannelState
       return 'contact_not_ready'
     }
 
-    ctx.host.log('thinking', '正在打开未读会话')
+    ctx.host.logInput('thinking', '正在打开未读会话')
     ctx.host.trace({
       phase: 'act',
       summary: '打开未读会话',

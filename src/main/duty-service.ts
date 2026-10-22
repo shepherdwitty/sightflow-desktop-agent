@@ -5,6 +5,13 @@ import { activateLicense, capabilityFromConfig, mapUpstreamFailure } from '../co
 import { readKnowledgeFile } from '../core/knowledge/read-file'
 import { ExperienceStore } from '../core/memory/experience-store'
 import { conversationKey, type ConversationKind } from '../core/memory/conversation-key'
+import {
+  acceptUsbBackend,
+  closeUsbLink,
+  onUsbReadyChange,
+  refreshUsbReady,
+  usbReadyCached
+} from '../core/rpa/input-driver'
 import { AppType } from '../core/rpa/types'
 import { detectWechatLayout, getLayoutCache } from '../core/rpa/vision-utils'
 import type { AgentProfile } from '../core/shift/agents'
@@ -50,6 +57,7 @@ export class DutyService implements ShiftController {
   ) {
     this.store = ShiftStore.open(dbPath)
     this.store.seedAgents(host.getSettings().systemPrompt)
+    onUsbReadyChange(() => this.publishInput())
   }
 
   register(ipc: IpcMain): void {
@@ -131,8 +139,22 @@ export class DutyService implements ShiftController {
       this.host.patchSettings({ licenseCode, gatewayUrl: input.gatewayUrl?.trim() || '' })
       return { ok: true, snapshot: this.snapshot() }
     })
-    ipc.handle('duty:setInputBackend', (_event, backend: 'software' | 'usb') => {
-      this.host.patchSettings({ inputBackend: backend === 'usb' ? 'usb' : 'software' })
+    ipc.handle('duty:setInputBackend', async (_event, backend: 'software' | 'usb') => {
+      if (backend === 'usb') {
+        const accepted = await acceptUsbBackend()
+        if (!accepted.ok) return { ok: false, message: accepted.message, snapshot: this.snapshot() }
+        this.host.patchSettings({ inputBackend: 'usb' })
+        this.publishInput()
+        return { ok: true, snapshot: this.snapshot() }
+      }
+      this.host.patchSettings({ inputBackend: 'software' })
+      await closeUsbLink()
+      this.publishInput()
+      return { ok: true, snapshot: this.snapshot() }
+    })
+    ipc.handle('duty:refreshUsb', async () => {
+      await refreshUsbReady()
+      this.publishInput()
       return this.snapshot()
     })
     ipc.handle('duty:probe', async () => this.probe())
@@ -429,7 +451,7 @@ export class DutyService implements ShiftController {
     hourlySent: number
     hourlyLimit: number
     inputBackend: 'software' | 'usb'
-    usbReady: false
+    usbReady: boolean
     mode: 'assist' | 'auto'
     current: { key: string; title: string; kind: ConversationKind; stable: boolean } | null
   } {
@@ -457,7 +479,7 @@ export class DutyService implements ShiftController {
       hourlySent: this.store.sentCountSince(startOfHour(new Date())),
       hourlyLimit: active.hourlyLimit,
       inputBackend: settings.inputBackend,
-      usbReady: false,
+      usbReady: usbReadyCached(),
       mode: this.mode(),
       current: this.lastIdentity
     }
@@ -527,6 +549,14 @@ export class DutyService implements ShiftController {
       stable: true
     }
     this.broadcast('duty:identity', this.lastIdentity)
+  }
+
+  private publishInput(): void {
+    const settings = this.host.getSettings()
+    this.broadcast('duty:input', {
+      inputBackend: settings.inputBackend === 'usb' ? 'usb' : 'software',
+      usbReady: usbReadyCached()
+    })
   }
 
   private broadcast(channel: string, payload: unknown): void {

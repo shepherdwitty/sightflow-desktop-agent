@@ -74,6 +74,9 @@ function buildTraceDigest(session: TraceSessionMeta, steps: TraceStep[]): string
     if (step.action?.payload) {
       parts.push(`内容：${truncate(step.action.payload, 200)}`)
     }
+    if (step.inputDevice === 'usb') {
+      parts.push('输入：USB 助理')
+    }
     if (step.outcome) {
       parts.push(
         `结果：${step.outcome.status}${step.outcome.detail ? `（${truncate(step.outcome.detail, 100)}）` : ''}`

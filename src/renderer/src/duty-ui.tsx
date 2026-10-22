@@ -119,6 +119,81 @@ function useSnapshot(reloadKey = 0): {
   return { snapshot, reload }
 }
 
+type UsbBannerState = 'checking' | 'absent' | 'plugged' | 'active'
+
+export function UsbStatusBanner(): React.JSX.Element {
+  const [ready, setReady] = useState<boolean | null>(null)
+  const [backend, setBackend] = useState<'software' | 'usb' | null>(null)
+
+  useEffect(() => {
+    let stopped = false
+    let pending = false
+    const apply = (next: { usbReady?: boolean; inputBackend?: 'software' | 'usb' } | null | undefined): void => {
+      if (!next || stopped) return
+      if (typeof next.usbReady === 'boolean') setReady(next.usbReady)
+      if (next.inputBackend === 'usb' || next.inputBackend === 'software') setBackend(next.inputBackend)
+    }
+    const tick = async (): Promise<void> => {
+      if (pending) return
+      pending = true
+      try {
+        const next = await dutyInvoke<{ usbReady: boolean; inputBackend: 'software' | 'usb' }>('duty:refreshUsb')
+        apply(next)
+      } catch {
+        // 下一轮再探，避免把一次失败画成没插上。
+      } finally {
+        pending = false
+      }
+    }
+    void tick()
+    const timer = setInterval(() => {
+      void tick()
+    }, 4000)
+    const off = window.electron?.on(
+      'duty:input',
+      (payload: { usbReady: boolean; inputBackend: 'software' | 'usb' }) => {
+        apply(payload)
+      }
+    )
+    return () => {
+      stopped = true
+      clearInterval(timer)
+      off?.()
+    }
+  }, [])
+
+  const selected = backend === 'usb'
+  const state: UsbBannerState = ready == null ? 'checking' : !ready ? 'absent' : selected ? 'active' : 'plugged'
+  const title =
+    state === 'checking'
+      ? '正在确认 USB'
+      : state === 'absent'
+        ? 'USB 没插上'
+        : state === 'plugged'
+          ? 'USB 已插上，未激活'
+          : 'USB 已插上，已激活'
+  const detail =
+    state === 'checking'
+      ? '稍等一下就知道设备在不在。'
+      : state === 'absent' && selected
+        ? 'USB 助理刚断开，这一条不会改用软件键鼠。'
+        : state === 'absent'
+          ? '当前使用软件键鼠。'
+          : state === 'plugged'
+            ? '设备已识别，当前仍使用软件键鼠。'
+            : '鼠标和文字回复走 USB 助理。'
+
+  return (
+    <div className={`usb-status ${state}${state === 'absent' && selected ? ' held' : ''}`} role="status">
+      <span className="usb-status-dot" />
+      <span className="usb-status-copy">
+        <span className="usb-status-title">{title}</span>
+        <span className="usb-status-detail">{detail}</span>
+      </span>
+    </div>
+  )
+}
+
 export function DutyCard({
   onToast
 }: {
@@ -279,6 +354,29 @@ export function DutyShiftPage({
   const [kind, setKind] = useState<Kind>('single')
   const [probeText, setProbeText] = useState('')
 
+  useEffect(() => {
+    let stopped = false
+    let pending = false
+    const tick = async (): Promise<void> => {
+      if (pending) return
+      pending = true
+      try {
+        await dutyInvoke('duty:refreshUsb')
+        if (!stopped) reload()
+      } finally {
+        pending = false
+      }
+    }
+    void tick()
+    const timer = setInterval(() => {
+      void tick()
+    }, 4000)
+    return () => {
+      stopped = true
+      clearInterval(timer)
+    }
+  }, [reload])
+
   const addCold = async (): Promise<void> => {
     const result = await dutyInvoke<{ ok: boolean; message?: string }>('duty:addCold', { title, kind })
     if (!result?.ok) {
@@ -296,7 +394,8 @@ export function DutyShiftPage({
   }
 
   const setBackend = async (backend: 'software' | 'usb'): Promise<void> => {
-    await dutyInvoke('duty:setInputBackend', backend)
+    const result = await dutyInvoke<{ ok?: boolean; message?: string }>('duty:setInputBackend', backend)
+    if (result && result.ok === false) onToast(result.message || '没有找到 USB 助理', 'error')
     reload()
   }
 
@@ -358,9 +457,9 @@ export function DutyShiftPage({
         {snapshot && snapshot.cold.length === 0 ? <div className="form-hint">还没有冷处理的会话。</div> : null}
       </div>
       <div className="card">
-        <div className="card-title">键鼠</div>
+        <div className="card-title">输入</div>
         <p className="form-hint">
-          USB 键鼠只更换输入设备，不改变发送频率。设备还没接上时，仍然用软件键鼠。云桌面没有物理 USB，这个选项保持不可用。
+          USB 助理只更换输入设备，不改变发送频率。设备还没接上时，仍然用软件键鼠。云桌面没有物理 USB，这个选项保持不可用。
         </p>
         <label className="form-hint">
           <input
@@ -371,8 +470,19 @@ export function DutyShiftPage({
           软件键鼠
         </label>
         <label className="form-hint" style={{ marginLeft: 12 }}>
-          <input type="radio" checked={snapshot?.inputBackend === 'usb'} disabled /> USB 键鼠（未连接）
+          <input
+            type="radio"
+            checked={snapshot?.inputBackend === 'usb'}
+            disabled={!snapshot?.usbReady}
+            onChange={() => {
+              if (snapshot?.usbReady) void setBackend('usb')
+            }}
+          />{' '}
+          {snapshot?.usbReady ? 'USB 助理' : 'USB 助理（未连接）'}
         </label>
+        {snapshot?.inputBackend === 'usb' && !snapshot.usbReady ? (
+          <p className="form-hint">USB 助理刚断开，这一条不会改用软件键鼠。</p>
+        ) : null}
       </div>
     </div>
   )

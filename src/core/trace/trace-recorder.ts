@@ -84,7 +84,8 @@ export class TraceRecorder {
       summary: input.summary,
       reasoning: input.reasoning,
       action: input.action,
-      outcome: input.outcome
+      outcome: input.outcome,
+      ...(input.inputDevice === 'usb' ? { inputDevice: 'usb' as const } : {})
     }
     const usage = input.usage ?? (input.claimPendingUsage ? takePendingUsage() : undefined)
     if (usage && usage.calls > 0) step.usage = usage

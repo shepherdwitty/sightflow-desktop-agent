@@ -6,7 +6,19 @@ import { getInputAreaFromCache } from './vision-utils'
 const IS_WINDOWS = process.platform === 'win32'
 const IS_MAC = process.platform === 'darwin'
 
+import { USB_INPUT_MESSAGE, UsbInputError } from './ch9329'
+import {
+  activeInput,
+  clampToPrimary,
+  currentInputMode,
+  holdUsbGesture,
+  onPrimaryScreen
+} from './input-driver'
 import { delay, randomDelayIn, getRobot } from './util'
+
+function softwareMissing(): boolean {
+  return currentInputMode() !== 'usb' && !getRobot()
+}
 
 // 原版 whatsapp-agent-demo 的贝塞尔曲线仿人滑动
 async function humanLikeMove(
@@ -18,60 +30,71 @@ async function humanLikeMove(
     baseDelay?: number
   } = {}
 ): Promise<void> {
-  const robot = getRobot()
-  if (!robot) return
+  if (softwareMissing()) return
+  const releaseGesture = currentInputMode() === 'usb' ? holdUsbGesture() : null
+  try {
+    const driver = activeInput()
+    if (currentInputMode() === 'usb' && !onPrimaryScreen(targetX, targetY)) {
+      throw new UsbInputError(USB_INPUT_MESSAGE.offscreen)
+    }
 
-  const { minSteps = 5, maxSteps = 15, baseDelay = 2 } = options
+    const { minSteps = 5, maxSteps = 15, baseDelay = 2 } = options
 
-  const startPos = robot.getMousePos()
-  const dx = targetX - startPos.x
-  const dy = targetY - startPos.y
-  const distance = Math.sqrt(dx * dx + dy * dy)
+    const startPos = driver.getMousePos()
+    const dx = targetX - startPos.x
+    const dy = targetY - startPos.y
+    const distance = Math.sqrt(dx * dx + dy * dy)
 
-  if (distance < 1) {
-    robot.moveMouse(Math.round(targetX), Math.round(targetY))
-    return
-  }
+    if (distance < 1) {
+      await driver.moveMouse(Math.round(targetX), Math.round(targetY))
+      return
+    }
 
-  // 根据距离决定步数
-  const steps = Math.min(
-    maxSteps,
-    Math.max(minSteps, Math.floor(distance / 40) + Math.floor(Math.random() * 3))
-  )
+    // 根据距离决定步数
+    const steps = Math.min(
+      maxSteps,
+      Math.max(minSteps, Math.floor(distance / 40) + Math.floor(Math.random() * 3))
+    )
 
-  // 生成贝塞尔曲线控制点 (Cubic Bezier)
-  const ctrl1X = startPos.x + dx * Math.random() * 0.5 + (Math.random() - 0.5) * distance * 0.2
-  const ctrl1Y = startPos.y + dy * Math.random() * 0.5 + (Math.random() - 0.5) * distance * 0.2
-  const ctrl2X = startPos.x + dx * (0.5 + Math.random() * 0.5) + (Math.random() - 0.5) * distance * 0.2
-  const ctrl2Y = startPos.y + dy * (0.5 + Math.random() * 0.5) + (Math.random() - 0.5) * distance * 0.2
+    // 生成贝塞尔曲线控制点 (Cubic Bezier)
+    const ctrl1X = startPos.x + dx * Math.random() * 0.5 + (Math.random() - 0.5) * distance * 0.2
+    const ctrl1Y = startPos.y + dy * Math.random() * 0.5 + (Math.random() - 0.5) * distance * 0.2
+    const ctrl2X = startPos.x + dx * (0.5 + Math.random() * 0.5) + (Math.random() - 0.5) * distance * 0.2
+    const ctrl2Y = startPos.y + dy * (0.5 + Math.random() * 0.5) + (Math.random() - 0.5) * distance * 0.2
 
-  for (let i = 1; i <= steps; i++) {
-    const t = i / steps
-    
-    // 匀速转非线性 (Ease Out)
-    const easeT = t * (2 - t)
-    
-    const mt = 1 - easeT
-    const mt2 = mt * mt
-    const mt3 = mt2 * mt
-    const easeT2 = easeT * easeT
-    const easeT3 = easeT2 * easeT
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps
 
-    // 贝塞尔曲线公式计算
-    const x = mt3 * startPos.x + 3 * mt2 * easeT * ctrl1X + 3 * mt * easeT2 * ctrl2X + easeT3 * targetX
-    const y = mt3 * startPos.y + 3 * mt2 * easeT * ctrl1Y + 3 * mt * easeT2 * ctrl2Y + easeT3 * targetY
+      // 匀速转非线性 (Ease Out)
+      const easeT = t * (2 - t)
 
-    // 加入随机细微抖动 (±1像素)
-    const jitterX = i === steps ? 0 : (Math.random() - 0.5) * 2
-    const jitterY = i === steps ? 0 : (Math.random() - 0.5) * 2
+      const mt = 1 - easeT
+      const mt2 = mt * mt
+      const mt3 = mt2 * mt
+      const easeT2 = easeT * easeT
+      const easeT3 = easeT2 * easeT
 
-    robot.moveMouse(Math.round(x + jitterX), Math.round(y + jitterY))
+      // 贝塞尔曲线公式计算
+      const x = mt3 * startPos.x + 3 * mt2 * easeT * ctrl1X + 3 * mt * easeT2 * ctrl2X + easeT3 * targetX
+      const y = mt3 * startPos.y + 3 * mt2 * easeT * ctrl1Y + 3 * mt * easeT2 * ctrl2Y + easeT3 * targetY
 
-    // 变频延迟，模拟人类微停顿
-    let stepDelay = baseDelay + Math.random() * 2
-    if (i > steps * 0.8) stepDelay += 2
-    
-    await delay(stepDelay)
+      // 加入随机细微抖动 (±1像素)
+      const jitterX = i === steps ? 0 : (Math.random() - 0.5) * 2
+      const jitterY = i === steps ? 0 : (Math.random() - 0.5) * 2
+
+      const rawX = Math.round(x + jitterX)
+      const rawY = Math.round(y + jitterY)
+      const point = currentInputMode() === 'usb' ? clampToPrimary(rawX, rawY) : { x: rawX, y: rawY }
+      await driver.moveMouse(point.x, point.y)
+
+      // 变频延迟，模拟人类微停顿
+      let stepDelay = baseDelay + Math.random() * 2
+      if (i > steps * 0.8) stepDelay += 2
+
+      await delay(stepDelay)
+    }
+  } finally {
+    releaseGesture?.()
   }
 }
 
@@ -81,27 +104,41 @@ async function humanLikeMove(
  * @param button 鼠标按键，默认 'left'
  */
 export async function humanLikeClick(button: 'left' | 'right' = 'left'): Promise<void> {
-  const robot = getRobot()
-  if (!robot) return
+  if (softwareMissing()) return
+  const releaseGesture = currentInputMode() === 'usb' ? holdUsbGesture() : null
+  const driver = activeInput()
 
+  let held = false
   try {
     // 模拟按下
-    robot.mouseToggle('down', button)
+    await driver.mouseToggle('down', button)
+    held = true
 
     // 模拟物理按压耗时 (50ms - 150ms)
     const pressDuration = 120 + Math.random() * 100
     await delay(Math.round(pressDuration))
 
     // 模拟抬起
-    robot.mouseToggle('up', button)
+    await driver.mouseToggle('up', button)
+    held = false
 
     // 点击后的随机微小停顿，模拟人类反应
     const afterClickDelay = 50 + Math.random() * 100
     await delay(Math.round(afterClickDelay))
   } catch (error) {
+    if (held) {
+      try {
+        await driver.mouseToggle('up', button)
+      } catch {
+        // 松开失败时把原来的错误交回去。
+      }
+    }
+    if (error instanceof UsbInputError) throw error
     console.error('【拟人化点击】执行失败:', error)
-    // 降级处理：如果异常，确保至少尝试点击
-    robot.mouseClick(button)
+    // 软件键鼠异常时再试一次完整点击。USB 失败不能改走软件注入。
+    await driver.mouseClick(button)
+  } finally {
+    releaseGesture?.()
   }
 }
 
@@ -141,8 +178,7 @@ export async function sendReplyByCoordsAction(
   policy?: PacingPolicy,
   alive?: () => boolean
 ): Promise<boolean> {
-  const robot = getRobot()
-  if (!robot) {
+  if (softwareMissing()) {
     console.error('[sendReplyByCoordsAction] RobotJS 缺失')
     return false
   }
@@ -171,14 +207,15 @@ export async function sendReplyByCoordsAction(
         await pasteText(action.text)
         dirty = true
       } else if (action.op === 'backspace') {
-        for (let i = 0; i < action.count; i += 1) robot.keyTap('backspace')
+        for (let i = 0; i < action.count; i += 1) await activeInput().keyTap('backspace')
       } else if (action.op === 'enter') {
         await commitInput()
         dirty = false
       }
     }
     return true
-  } catch (err: any) {
+  } catch (err: unknown) {
+    if (err instanceof UsbInputError) throw err
     console.error('[sendReplyByCoordsAction] Failed:', err)
     return false
   } finally {
@@ -210,39 +247,39 @@ function restoreClipboard(saved: { text: string; image: ReturnType<typeof clipbo
 }
 
 async function focusInput(x: number, y: number): Promise<void> {
-  const robot = getRobot()
-  if (!robot) return
+  if (softwareMissing()) return
+  const driver = activeInput()
   await humanLikeMove(x, y)
   await randomDelayIn(100, 200)
-  robot.mouseClick('left')
+  await driver.mouseClick('left')
   await randomDelayIn(200, 300)
 }
 
 async function pasteText(text: string): Promise<void> {
-  const robot = getRobot()
-  if (!robot) return
+  if (softwareMissing()) return
+  const driver = activeInput()
   clipboard.writeText(text)
   await randomDelayIn(50, 100)
-  if (IS_MAC) robot.keyTap('v', ['command'])
-  else robot.keyTap('v', ['control'])
+  if (IS_MAC) await driver.keyTap('v', ['command'])
+  else await driver.keyTap('v', ['control'])
   await randomDelayIn(80, 160)
 }
 
 async function commitInput(): Promise<void> {
-  const robot = getRobot()
-  if (!robot) return
+  if (softwareMissing()) return
+  const driver = activeInput()
   await randomDelayIn(120, 220)
-  robot.keyTap('enter')
+  await driver.keyTap('enter')
   if (IS_WINDOWS) {
-    robot.keyTap('enter', ['control'])
+    await driver.keyTap('enter', ['control'])
     await randomDelayIn(40, 60)
-    robot.keyTap('backspace')
+    await driver.keyTap('backspace')
   } else {
-    robot.keyTap('enter', ['command'])
+    await driver.keyTap('enter', ['command'])
     await randomDelayIn(20, 40)
-    robot.keyToggle('command', 'up')
+    await driver.keyToggle('command', 'up')
     await randomDelayIn(20, 40)
-    robot.keyTap('backspace')
+    await driver.keyTap('backspace')
   }
 }
 
@@ -253,8 +290,8 @@ export async function sendImageByCoordsAction(
   policy?: PacingPolicy,
   alive?: () => boolean
 ): Promise<boolean> {
-  const robot = getRobot()
-  if (!robot) return false
+  if (softwareMissing()) return false
+  const driver = activeInput()
   const image = nativeImage.createFromPath(filePath)
   if (image.isEmpty()) return false
   const saved = snapshotClipboard()
@@ -268,14 +305,15 @@ export async function sendImageByCoordsAction(
     if (stopped(alive)) return false
     clipboard.writeImage(image)
     await randomDelayIn(80, 140)
-    if (IS_MAC) robot.keyTap('v', ['command'])
-    else robot.keyTap('v', ['control'])
+    if (IS_MAC) await driver.keyTap('v', ['command'])
+    else await driver.keyTap('v', ['control'])
     dirty = true
     if (stopped(alive)) return false
     await commitInput()
     dirty = false
     return true
   } catch (error) {
+    if (error instanceof UsbInputError) throw error
     console.error('[sendImageByCoordsAction] Failed:', error)
     return false
   } finally {
@@ -285,13 +323,13 @@ export async function sendImageByCoordsAction(
 }
 
 async function clearFocusedDraft(): Promise<void> {
-  const robot = getRobot()
-  if (!robot) return
+  if (softwareMissing()) return
+  const driver = activeInput()
   try {
-    if (IS_MAC) robot.keyTap('a', ['command'])
-    else robot.keyTap('a', ['control'])
+    if (IS_MAC) await driver.keyTap('a', ['command'])
+    else await driver.keyTap('a', ['control'])
     await randomDelayIn(20, 40)
-    robot.keyTap('backspace')
+    await driver.keyTap('backspace')
   } catch {
     // 输入框里剩下的半句，下一轮粘贴会接在后面。
   }
@@ -359,8 +397,8 @@ export async function activeUnreadByClickAction(
   appType: AppType,
   clickPolicy?: ClickPolicy
 ): Promise<void> {
-  const robot = getRobot()
-  if (!robot) return
+  if (softwareMissing()) return
+  const driver = activeInput()
 
   const [centerX, centerY] = coordinates
   const policy: ClickPolicy = clickPolicy ?? defaultClickPolicy(appType)
@@ -380,11 +418,11 @@ export async function activeUnreadByClickAction(
   await randomDelayIn(150, 250)
 
   // 根据 policy 执行单击或双击
-  robot.mouseClick('left')
+  await driver.mouseClick('left')
   if (!isSingleClick) {
     // 双击：第二次点击
     await randomDelayIn(40, 60)
-    robot.mouseClick('left')
+    await driver.mouseClick('left')
   }
 }
 
@@ -396,8 +434,8 @@ export async function activeUnreadByClickAction(
 export async function clickUnreadContactAction(
   coordinates: [number, number]
 ): Promise<void> {
-  const robot = getRobot()
-  if (!robot) return
+  if (softwareMissing()) return
+  const driver = activeInput()
 
   const [firstContactX, firstContactY] = coordinates
   console.log('[clickUnreadContact] 点击联系人', {
@@ -410,7 +448,7 @@ export async function clickUnreadContactAction(
   await randomDelayIn(150, 250)
 
   // 点击左键
-  robot.mouseClick('left')
+  await driver.mouseClick('left')
   console.log('[clickUnreadContact] 点击完成')
   await randomDelayIn(150, 250)
 }

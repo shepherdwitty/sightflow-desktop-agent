@@ -1,10 +1,11 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { COMMERCIAL, SHOW_TOKEN_COST } from './feature-flags'
-import { DutyAgentPage, DutyCard, DutyConnectionPage, DutyRecordPage, DutyShiftPage } from './duty-ui'
+import { DutyAgentPage, DutyCard, DutyConnectionPage, DutyRecordPage, DutyShiftPage, UsbStatusBanner } from './duty-ui'
 import { PURPOSE_LABEL, fmtYuan, fmtNum, type UsageAgg, type UsageSummary } from './usage-ui'
 import { t } from './i18n'
 import logoUrl from './assets/logo.svg'
 import MemoryWindow from './MemoryWindow'
+import { UsbLogIcon } from './usb-mark'
 import './index.css'
 
 interface LogEntry {
@@ -35,6 +36,9 @@ interface BoxRegions {
   scaleFactor?: number
   capturedAt: number
 }
+
+/** 与 src/core/rpa/ch9329.ts 的 USB_ACTION_MARK 保持一致。 */
+const USB_LOG_PREFIX = '［USB］ '
 
 const APP_TYPE_LABELS: Record<AppType, string> = {
   wechat: '微信',
@@ -279,6 +283,7 @@ function App() {
     <div className="app">
       <header className="app-header">
         <img src={logoUrl} alt="ChatBuddy" className="app-logo" />
+        <UsbStatusBanner />
       </header>
 
       <div className="app-content">
@@ -425,15 +430,20 @@ function ControlPanel({
           {logs.length === 0 ? (
             <div className="message-log-empty">{t('control.log.empty')}</div>
           ) : (
-            logs.map((entry, i) => (
-              <div className="log-entry" key={i}>
-                <span className="log-time">{entry.time}</span>
-                <span className={`log-type ${entry.type}`}>
-                  {t(`control.log.${entry.type}` as never)}
-                </span>
-                <span>{entry.content}</span>
-              </div>
-            ))
+            logs.map((entry, i) => {
+              const marked = entry.content.startsWith(USB_LOG_PREFIX)
+              const content = marked ? entry.content.slice(USB_LOG_PREFIX.length) : entry.content
+              return (
+                <div className="log-entry" key={i}>
+                  <span className="log-time">{entry.time}</span>
+                  {marked ? <UsbLogIcon /> : null}
+                  <span className={`log-type ${entry.type}`}>
+                    {t(`control.log.${entry.type}` as never)}
+                  </span>
+                  <span>{content}</span>
+                </div>
+              )
+            })
           )}
         </div>
       </div>

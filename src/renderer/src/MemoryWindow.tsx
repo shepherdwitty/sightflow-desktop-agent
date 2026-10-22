@@ -9,6 +9,7 @@ import { COMMERCIAL, SHOW_TOKEN_COST } from './feature-flags'
 import { PURPOSE_LABEL } from './usage-ui'
 import logoUrl from './assets/logo.svg'
 import { showToast } from './App'
+import { UsbLogIcon } from './usb-mark'
 
 // ── 与 src/core/trace / memory 对齐的本地类型（renderer 约定：不跨层 import） ──
 
@@ -53,6 +54,8 @@ interface TraceStep {
   reasoning?: { content: string; memoryRefs?: string[] }
   action?: { kind: string; target?: [number, number]; payload?: string }
   outcome?: { status: 'ok' | 'fail' | 'skip'; detail?: string; latencyMs?: number }
+  /** 这一步的点击或发送由 USB 助理执行。旧轨迹没有这个字段。 */
+  inputDevice?: 'usb'
 }
 
 interface ExperienceCard {
@@ -72,6 +75,14 @@ const PHASE_LABELS: Record<TracePhase, string> = {
   think: '判断',
   act: '动作',
   verify: '验证'
+}
+
+function UsbTraceMark(): React.JSX.Element {
+  return (
+    <span className="trace-usb-mark" title="这一步由 USB 助理执行">
+      <UsbLogIcon />
+    </span>
+  )
 }
 
 const SOURCE_LABELS: Record<ExperienceCard['source'], string> = {
@@ -380,6 +391,7 @@ function TraceView({
                 <span className={`phase-badge phase-${step.phase}`}>
                   {PHASE_LABELS[step.phase]}
                 </span>
+                {step.inputDevice === 'usb' ? <UsbTraceMark /> : null}
                 <span className="trace-step-time">
                   #{step.seq} · {formatTime(step.ts)}
                 </span>
@@ -513,7 +525,10 @@ function StepDetail({
       <div className="step-detail-fields">
         <div className="step-detail-row">
           <span className="step-detail-label">摘要</span>
-          <span>{step.summary}</span>
+          <span className="step-detail-value">
+            {step.inputDevice === 'usb' ? <UsbTraceMark /> : null}
+            {step.summary}
+          </span>
         </div>
         {step.reasoning?.content && step.reasoning.content !== step.summary ? (
           <div className="step-detail-row">
